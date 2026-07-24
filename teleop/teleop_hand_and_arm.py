@@ -20,6 +20,8 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.utils.locomotion_retarget import HeadLocomotionRetargeter, LocoTuning, eval_deadman
+from teleop.utils.locomotion_publisher import LocomotionCommandPublisher, parse_sign
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -91,6 +93,22 @@ if __name__ == '__main__':
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
+    # head/body-driven locomotion (third mode). All opt-in: defaults preserve existing behaviour.
+    parser.add_argument('--head-loco', action='store_true', help='Enable head/body-driven locomotion (lean or physically step to walk)')
+    parser.add_argument('--loco-yaw-source', type=str, choices=['roll', 'off'], default='roll', help='How to steer: head roll (tilt) or no turning at all')
+    parser.add_argument('--loco-deadman', type=str, default='left_fist',
+                        choices=['left_fist', 'right_fist', 'both_fist', 'left_pinch', 'right_pinch', 'left_trigger', 'right_trigger', 'none'],
+                        help='Hold-to-walk gesture. Releasing it stops the robot immediately.')
+    parser.add_argument('--loco-max-vx', type=float, default=0.40, help='Max forward/back speed (m/s)')
+    parser.add_argument('--loco-max-vy', type=float, default=0.25, help='Max lateral speed (m/s)')
+    parser.add_argument('--loco-max-wz', type=float, default=0.60, help='Max yaw rate (rad/s)')
+    parser.add_argument('--loco-step-deadzone', type=float, default=0.10, help='Displacement ignored before walking starts (m)')
+    parser.add_argument('--loco-step-full', type=float, default=0.45, help='Displacement giving full speed (m)')
+    parser.add_argument('--loco-neck-offset', type=float, default=0.10, help='Camera-to-neck-pivot distance (m)')
+    parser.add_argument('--loco-rate', type=float, default=None, help='Publisher rate (Hz). Default 100 in sim, 30 on hardware.')
+    parser.add_argument('--loco-sign', type=str, default='1,-1,-1', help='Wire sign per axis "vx,vy,wz". Establish with loco_sign_probe.py.')
+    parser.add_argument('--loco-height', type=float, default=0.8, help='Base height command (4th element; G123 ignores it)')
+    parser.add_argument('--loco-debug', action='store_true', help='Log locomotion status at 2 Hz')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
@@ -101,6 +119,30 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    # --- head-loco target normalisation -------------------------------------------------
+    # The correct arm topic differs by target and getting it wrong is silent and fatal, so
+    # --head-loco resolves it here rather than trusting the operator to remember --motion.
+    #   sim      : --motion OFF -> rt/lowcmd  (the only topic the Isaac sim subscribes to)
+    #   hardware : --motion ON  -> rt/arm_sdk (the only arm interface that coexists with the
+    #              balance controller) AND skips Enter_Debug_Mode(), which would otherwise
+    #              disable balance and make walking impossible.
+    if args.head_loco:
+        if args.sim:
+            if args.motion:
+                parser.error(
+                    "--head-loco --sim is incompatible with --motion: --motion routes arm "
+                    "commands to rt/arm_sdk, which the Isaac Lab sim does not subscribe to "
+                    "(it listens on rt/lowcmd), so the arms would go dead. Drop --motion for sim.")
+        else:
+            if not args.motion:
+                logger_mp.warning("--head-loco on hardware: forcing --motion so arms use "
+                                  "rt/arm_sdk and the balance controller stays up.")
+            args.motion = True
+        try:
+            loco_sign = parse_sign(args.loco_sign)
+        except ValueError as e:
+            parser.error(str(e))
+
     # --- hardware debug-mode guard -------------------------------------------------------
     # Without --motion, arm commands go out on raw rt/lowcmd via Enter_Debug_Mode(), which
     # disables the robot's internal balance controller entirely. On hardware this is one
@@ -108,6 +150,10 @@ if __name__ == '__main__':
     # supported by a gantry. Require an explicit opt-in before allowing that path; refuse to
     # start rather than silently dropping into Debug Mode. --sim has no physical robot to
     # endanger and its normal workflow already omits --motion, so this does not apply there.
+    #
+    # Must run AFTER the head-loco block above: on hardware that block forces args.motion
+    # True, which legitimately satisfies this guard. Ordering it first would reject
+    # --head-loco hardware runs that were never going to enter Debug Mode.
     if not args.sim and not args.motion and not args.debug_mode:
         parser.error(
             "Refusing to start: --motion is not set. Without it, this program enters the "
@@ -117,6 +163,11 @@ if __name__ == '__main__':
             "Debug Mode.")
 
     logger_mp.info(f"args: {args}")
+
+    # Defined before the try so the finally block can always reference them.
+    loco_wrapper = None
+    loco_retarget = None
+    loco_pub = None
 
     try:
         # setup dds communication domains id
@@ -160,7 +211,10 @@ if __name__ == '__main__':
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
-            if args.input_mode == "controller":
+            # On hardware, head-loco also needs a LocoClient. In sim there is no locomotion
+            # service at all -- the twist goes out over the run_command DDS topic instead --
+            # so never construct one there.
+            if args.input_mode == "controller" or (args.head_loco and not args.sim):
                 loco_wrapper = LocoClientWrapper()
         else:
             motion_switcher = MotionSwitcher()
@@ -255,6 +309,24 @@ if __name__ == '__main__':
             from teleop.utils.sim_state_topic import start_sim_state_subscribe
             sim_state_subscriber = start_sim_state_subscribe()
 
+        # head/body-driven locomotion. Constructed after ChannelFactoryInitialize so the
+        # publisher binds the right DDS domain (1 in sim).
+        if args.head_loco:
+            loco_retarget = HeadLocomotionRetargeter(
+                LocoTuning(max_vx=args.loco_max_vx,
+                           max_vy=args.loco_max_vy,
+                           max_wz=args.loco_max_wz,
+                           step_deadzone_m=args.loco_step_deadzone,
+                           step_full_m=args.loco_step_full,
+                           neck_offset_m=args.loco_neck_offset,
+                           height=args.loco_height),
+                yaw_mode=args.loco_yaw_source)
+            loco_pub = LocomotionCommandPublisher(sim=args.sim,
+                                                  loco_wrapper=loco_wrapper,
+                                                  rate_hz=args.loco_rate,
+                                                  sign=loco_sign,
+                                                  height=args.loco_height)
+
         # record + headless / non-headless mode
         if args.record:
             recorder = EpisodeWriter(task_dir = os.path.join(args.task_dir, args.task_name),
@@ -272,6 +344,23 @@ if __name__ == '__main__':
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
+        if args.head_loco:
+            arm_topic = "rt/arm_sdk" if args.motion else "rt/lowcmd"
+            logger_mp.info("----------------------------------------------------------------")
+            logger_mp.info("🚶  HEAD/BODY LOCOMOTION ENABLED")
+            logger_mp.info(f"    target        : {'SIM' if args.sim else 'HARDWARE'}")
+            logger_mp.info(f"    arm topic     : {arm_topic}")
+            logger_mp.info(f"    locomotion    : {loco_pub.transport_description}")
+            logger_mp.info(f"    wire sign     : {loco_sign}  (vx,vy,wz)")
+            logger_mp.info(f"    deadman       : hold [{args.loco_deadman}] to walk, release to STOP")
+            logger_mp.info(f"    steering      : {args.loco_yaw_source}"
+                           f"{'  (tilt head left/right)' if args.loco_yaw_source == 'roll' else ''}")
+            logger_mp.info(f"    limits        : vx<={args.loco_max_vx} vy<={args.loco_max_vy} "
+                           f"wz<={args.loco_max_wz}")
+            logger_mp.info("    engaging the deadman calibrates your neutral pose THERE;")
+            logger_mp.info("    release + re-engage to re-centre (the 'ratchet').")
+            logger_mp.info("⚠️  YOU ARE BLIND TO YOUR REAL SURROUNDINGS WHILE WALKING.")
+            logger_mp.info("⚠️  Clear your space, set your guardian, and have a spotter.")
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
@@ -281,6 +370,10 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
+        # Started only after [r], so nothing can move the robot before the operator is ready.
+        if loco_pub is not None:
+            loco_pub.start()
+        loco_dbg_i = 0
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
@@ -313,6 +406,25 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+
+            # head/body-driven locomotion. Updated here, immediately after the tele data
+            # arrives and before IK, so solver latency never delays the setpoint. The
+            # publisher thread re-sends it at its own rate.
+            if args.head_loco:
+                walk_enable = eval_deadman(tele_data, args.loco_deadman, args.input_mode)
+                twist = loco_retarget.update(tele_data.head_pose, walk_enable, time.monotonic())
+                loco_pub.set_twist(twist)
+                if args.loco_debug:
+                    loco_dbg_i += 1
+                    if loco_dbg_i % max(1, int(args.frequency // 2)) == 0:   # ~2 Hz
+                        st = loco_retarget.status
+                        logger_mp.info(
+                            f"[loco] deadman={'HELD' if walk_enable else 'open'} "
+                            f"fwd={st['fwd_m']:+.3f}m lat={st['lat_m']:+.3f}m "
+                            f"roll={st['roll_rad']:+.2f}rad -> "
+                            f"vx={twist.vx:+.3f} vy={twist.vy:+.3f} wz={twist.wz:+.3f} "
+                            f"({st['reason']})")
+
             if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
@@ -342,7 +454,13 @@ if __name__ == '__main__':
                 pass
             
             # high level control
-            if args.input_mode == "controller" and args.motion:
+            if args.head_loco:
+                # Head-loco owns the twist (published above), so the thumbstick path is
+                # skipped -- two sources must never fight over the same command.
+                if args.input_mode == "controller" and tele_data.right_ctrl_aButton:
+                    START = False
+                    STOP = True
+            elif args.input_mode == "controller" and args.motion:
                 # quit teleoperater
                 if tele_data.right_ctrl_aButton:
                     START = False
@@ -530,6 +648,14 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
+        # FIRST: stop the robot walking. This outranks homing the arms, and covers every
+        # exit path -- [q], right_ctrl_aButton, KeyboardInterrupt and unhandled exceptions.
+        try:
+            if loco_pub is not None:
+                loco_pub.stop()
+        except Exception as e:
+            logger_mp.error(f"Failed to stop locomotion publisher: {e}")
+
         try:
             arm_ctrl.ctrl_dual_arm_go_home()
         except Exception as e:
