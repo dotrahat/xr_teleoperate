@@ -66,13 +66,41 @@ def _find_key(node, target):
     return None
 
 
+def _decode_nested(node, depth=0):
+    """Decode JSON strings nested inside an already-decoded payload.
+
+    rt/sim_state is DOUBLE-encoded: sim_main.py builds
+    {"init_state": sim_state_to_json(env_state), ...} -- so init_state is itself a JSON
+    *string* -- and SimStateDDS.dds_publisher then json.dumps() the whole dict again.
+    A single json.loads() therefore leaves init_state as a str, and the articulation data
+    is invisible to a plain dict walk.
+    """
+    if depth > 3:
+        return node
+    if isinstance(node, str):
+        stripped = node.lstrip()
+        if stripped[:1] in ("{", "["):
+            try:
+                return _decode_nested(json.loads(node), depth + 1)
+            except Exception:
+                return node
+        return node
+    if isinstance(node, dict):
+        return {k: _decode_nested(v, depth + 1) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_decode_nested(v, depth + 1) for v in node]
+    return node
+
+
 def extract_base_pose(payload):
     """(x, y, yaw) of the robot base from an rt/sim_state message, or None.
 
-    The sim publishes env.scene.get_state() as JSON every loop iteration
-    (sim_main.py:485-493). Isaac Lab stores root_pose as [x, y, z, qw, qx, qy, qz].
+    The sim publishes env.scene.get_state() every loop iteration (sim_main.py:485-493).
+    Verified wire shape:
+        {"init_state": "{\\"articulation\\": {\\"robot\\": {\\"root_pose\\": [[x, y, z, qw, qx, qy, qz]], ...
+    i.e. root_pose is batched (env dim first) and the quaternion is w-first.
     """
-    root_pose = _find_key(payload, "root_pose")
+    root_pose = _find_key(_decode_nested(payload), "root_pose")
     if root_pose is None:
         return None
     while isinstance(root_pose, list) and root_pose and isinstance(root_pose[0], list):

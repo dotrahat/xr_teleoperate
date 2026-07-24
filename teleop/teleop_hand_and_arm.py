@@ -106,7 +106,7 @@ if __name__ == '__main__':
     parser.add_argument('--loco-step-full', type=float, default=0.45, help='Displacement giving full speed (m)')
     parser.add_argument('--loco-neck-offset', type=float, default=0.10, help='Camera-to-neck-pivot distance (m)')
     parser.add_argument('--loco-rate', type=float, default=None, help='Publisher rate (Hz). Default 100 in sim, 30 on hardware.')
-    parser.add_argument('--loco-sign', type=str, default='1,-1,-1', help='Wire sign per axis "vx,vy,wz". Establish with loco_sign_probe.py.')
+    parser.add_argument('--loco-sign', type=str, default='1,1,1', help='Wire sign per axis "vx,vy,wz". Measured on G129 Inspire wholebody; re-verify per policy with loco_sign_probe.py.')
     parser.add_argument('--loco-height', type=float, default=0.8, help='Base height command (4th element; G123 ignores it)')
     parser.add_argument('--loco-debug', action='store_true', help='Log locomotion status at 2 Hz')
     # record mode and task info

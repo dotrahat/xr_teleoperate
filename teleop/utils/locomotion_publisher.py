@@ -68,15 +68,22 @@ def _as_twist_tuple(twist, default_height):
 class LocomotionCommandPublisher:
     """Publishes locomotion twists on a dedicated thread with a staleness watchdog.
 
-    `sign` adapts the retargeter's robot-frame twist (x front, y left, z CCW) to whatever
-    the *sim wire* expects, and must be established empirically with loco_sign_probe.py --
-    the reference senders negate y and yaw relative to their internal variables, but those
-    variables' own convention is undocumented. It is deliberately NOT applied to the
-    LocoClient path: that API already takes a robot-frame twist.
+    `sign` adapts the retargeter's robot-frame twist (x front, y left, z CCW) to the *sim
+    wire* convention. MEASURED on the G129 Inspire wholebody policy (policy.onnx) with
+    loco_sign_probe.py: the wire is plain robot-frame, so (1, 1, 1).
+
+      +vx 0.5 -> +0.80 m / +1.21 m forward      +vy 0.4 -> +1.52 m left
+      -vy 0.4 -> -1.92 m left (i.e. right)      +wz -> +yaw CCW, -wz -> -yaw CW
+
+    Note this does NOT match the reference senders' str([x, -y, -yaw, h]): they negate
+    their own internal variables, whose convention is undocumented. Re-verify per policy --
+    G123 uses a different ONNX from a different training run.
+
+    Deliberately NOT applied to the LocoClient path: that API already takes robot frame.
     """
 
     def __init__(self, sim, loco_wrapper=None, rate_hz=None, watchdog_timeout_s=0.25,
-                 sign=(1.0, -1.0, -1.0), accel_xy=1.0, accel_yaw=2.0, height=DEFAULT_HEIGHT):
+                 sign=(1.0, 1.0, 1.0), accel_xy=1.0, accel_yaw=2.0, height=DEFAULT_HEIGHT):
         self.sim = sim
         self.loco_wrapper = loco_wrapper
         # LocoClient.Move is an RPC per call and would saturate at 100 Hz; the existing
