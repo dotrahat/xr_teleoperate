@@ -3,7 +3,7 @@ import json
 import cv2
 import time
 import rerun as rr
-import rerun.blueprint as rrb
+# import rerun.blueprint as rrb
 from datetime import datetime
 os.environ["RUST_LOG"] = "error"
 
@@ -93,19 +93,19 @@ class RerunLogger:
                            f"{self.prefix}left_ee", 
                            f"{self.prefix}right_ee"
         ]
-        for plot_path in data_plot_paths:
-            view = rrb.TimeSeriesView(
-                origin = plot_path,
-                time_ranges=[
-                    rrb.VisibleTimeRange(
-                        "idx",
-                        start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-                        end = rrb.TimeRangeBoundary.cursor_relative(),
-                    )
-                ],
-                plot_legend = rrb.PlotLegend(visible = True),
-            )
-            views.append(view)
+        # for plot_path in data_plot_paths:
+        #     view = rrb.TimeSeriesView(
+        #         origin = plot_path,
+        #         time_ranges=[
+        #             rrb.VisibleTimeRange(
+        #                 "idx",
+        #                 start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
+        #                 end = rrb.TimeRangeBoundary.cursor_relative(),
+        #             )
+        #         ],
+        #         plot_legend = rrb.PlotLegend(visible = True),
+        #     )
+        #     views.append(view)
 
         # image_plot_paths = [
         #                     f"{self.prefix}colors/color_0",
@@ -126,18 +126,19 @@ class RerunLogger:
         #     )
         #     views.append(view)
 
-        grid = rrb.Grid(contents = views,
-                        grid_columns=2,               
-                        column_shares=[1, 1],
-                        row_shares=[1, 1], 
-        )
-        views.append(rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed))
-        views.append(rr.blueprint.TimePanel(state=rrb.PanelState.Collapsed))
-        rr.send_blueprint(grid)
+        # grid = rrb.Grid(contents = views,
+        #                 grid_columns=2,               
+        #                 column_shares=[1, 1],
+        #                 row_shares=[1, 1], 
+        # )
+        # views.append(rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed))
+        # views.append(rr.blueprint.TimePanel(state=rrb.PanelState.Collapsed))
+        # rr.send_blueprint(grid)
 
 
     def log_item_data(self, item_data: dict):
-        rr.set_time_sequence("idx", item_data.get('idx', 0))
+        # rr.set_time_sequence("idx", item_data.get('idx', 0))
+        rr.set_time("idx", sequence=item_data.get('idx', 0))
 
         # Log states
         states = item_data.get('states', {}) or {}
@@ -145,7 +146,8 @@ class RerunLogger:
             if part != "body" and state_info:
                 values = state_info.get('qpos', [])
                 for idx, val in enumerate(values):
-                    rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalar(val))
+                    # rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalar(val))
+                    rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalars(val))
 
         # Log actions
         actions = item_data.get('actions', {}) or {}
@@ -153,7 +155,8 @@ class RerunLogger:
             if part != "body" and action_info:
                 values = action_info.get('qpos', [])
                 for idx, val in enumerate(values):
-                    rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val))
+                    # rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val))
+                    rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalars(val))
 
         # # Log colors (images)
         # colors = item_data.get('colors', {}) or {}

@@ -317,14 +317,16 @@ class G1_23_ArmIK:
         self.Visualization = Visualization
 
         # fixed cache file path
-        self.cache_path = "g1_23_model_cache.pkl"
+        self.cache_path = "g1_23_mode10_model_cache.pkl"
 
         if not self.Unit_Test:
-            self.urdf_path = '../assets/g1/g1_body23.urdf'
-            self.model_dir = '../assets/g1/'
+            self.urdf_path = '../assets/g1/mode10/g1_23dof_mode_10_with_brainco.urdf'
+            self.model_dir = '../assets/g1/mode10/'
+
+            
         else:
-            self.urdf_path = '../../assets/g1/g1_body23.urdf'
-            self.model_dir = '../../assets/g1/'
+            self.urdf_path = '../../assets/g1/mode10/g1_23dof_mode_10_with_brainco.urdf'
+            self.model_dir = '../../assets/g1/mode10/'
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -348,6 +350,31 @@ class G1_23_ArmIK:
                                             "right_ankle_pitch_joint" ,
                                             "right_ankle_roll_joint" ,
                                             "waist_yaw_joint" ,
+
+                                            # BrainCo hand joints (not part of the arm IK)
+                                            "left_thumb_metacarpal_joint" ,
+                                            "left_thumb_proximal_joint" ,
+                                            "left_thumb_distal_joint" ,
+                                            "left_index_proximal_joint" ,
+                                            "left_index_distal_joint" ,
+                                            "left_middle_proximal_joint" ,
+                                            "left_middle_distal_joint" ,
+                                            "left_ring_proximal_joint" ,
+                                            "left_ring_distal_joint" ,
+                                            "left_pinky_proximal_joint" ,
+                                            "left_pinky_distal_joint" ,
+
+                                            "right_thumb_metacarpal_joint" ,
+                                            "right_thumb_proximal_joint" ,
+                                            "right_thumb_distal_joint" ,
+                                            "right_index_proximal_joint" ,
+                                            "right_index_distal_joint" ,
+                                            "right_middle_proximal_joint" ,
+                                            "right_middle_distal_joint" ,
+                                            "right_ring_proximal_joint" ,
+                                            "right_ring_distal_joint" ,
+                                            "right_pinky_proximal_joint" ,
+                                            "right_pinky_distal_joint" ,
                                         ]
 
             self.reduced_robot = self.robot.buildReducedRobot(

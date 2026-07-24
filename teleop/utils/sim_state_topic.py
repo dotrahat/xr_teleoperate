@@ -35,14 +35,24 @@ class SharedMemoryManager:
                 self.shm = shared_memory.SharedMemory(name=name)
                 self.shm_name = name
                 self.created = False
+                if self.shm.size < size:
+                    # a stale segment from a previous run is smaller than what we need now
+                    self.shm.close()
+                    self.shm.unlink()
+                    self.shm = shared_memory.SharedMemory(create=True, size=size, name=name)
+                    self.shm_name = self.shm.name
+                    self.created = True
             except FileNotFoundError:
-                self.shm = shared_memory.SharedMemory(create=True, size=size)
+                self.shm = shared_memory.SharedMemory(create=True, size=size, name=name)
                 self.shm_name = self.shm.name
                 self.created = True
         else:
             self.shm = shared_memory.SharedMemory(create=True, size=size)
             self.shm_name = self.shm.name
             self.created = True
+
+        # the actual segment may be larger than requested (recreated stale one, or OS rounding)
+        self.size = self.shm.size
     
     def write_data(self, data: Dict[str, Any]) -> bool:
         """Write data to shared memory
@@ -121,7 +131,7 @@ class SharedMemoryManager:
 class SimStateSubscriber:
     """Simple sim state subscriber class"""
     
-    def __init__(self, shm_name: str = "sim_state_cmd_data", shm_size: int = 4096):
+    def __init__(self, shm_name: str = "sim_state_cmd_data", shm_size: int = 262144):
         """Initialize the subscriber
         
         Args:
@@ -223,7 +233,7 @@ class SimStateSubscriber:
         return self.running
 
 
-def start_sim_state_subscribe(shm_name: str = "sim_state_cmd_data", shm_size: int = 4096) -> SimStateSubscriber:
+def start_sim_state_subscribe(shm_name: str = "sim_state_cmd_data", shm_size: int = 262144) -> SimStateSubscriber:
     """Start sim state subscribing
     
     Args:

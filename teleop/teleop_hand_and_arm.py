@@ -78,7 +78,8 @@ if __name__ == '__main__':
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
-    parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
+    # parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
+    parser.add_argument('--img-server-ip', type=str, default='0.0.0.0', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
@@ -116,7 +117,9 @@ if __name__ == '__main__':
             listen_keyboard_thread.start()
 
         # image client
-        img_client = ImageClient(host=args.img_server_ip)
+        # request_port must match ZMQ_Responser's bind port on the server (60000).
+        # ImageClient's default of 60001 collides with the head camera's WebRTC port.
+        img_client = ImageClient(host=args.img_server_ip, request_port=60000)
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
         xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
@@ -133,6 +136,7 @@ if __name__ == '__main__':
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
                                      )
+        
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
         if args.motion:
@@ -199,8 +203,9 @@ if __name__ == '__main__':
             dual_hand_data_lock = Lock()
             dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
             dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Brainco_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                           dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
+            hand_ctrl = Brainco_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock,
+                                           dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim,
+                                           input_mode=args.input_mode)
         else:
             pass
         
@@ -293,6 +298,16 @@ if __name__ == '__main__':
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
+            elif args.ee == "brainco" and args.input_mode == "controller":
+                # Controller mode: trigger drives the four fingers, squeeze drives the thumb.
+                # Element 0 = finger closure, element 1 = thumb closure; both [0,1] (0 open, 1 closed).
+                # triggerValue is 10.0 (released) → 0.0 (fully pressed); squeezeValue is 0.0 → 1.0.
+                with left_hand_pos_array.get_lock():
+                    left_hand_pos_array[0] = 1.0 - tele_data.left_ctrl_triggerValue / 10.0
+                    left_hand_pos_array[1] = tele_data.left_ctrl_squeezeValue
+                with right_hand_pos_array.get_lock():
+                    right_hand_pos_array[0] = 1.0 - tele_data.right_ctrl_triggerValue / 10.0
+                    right_hand_pos_array[1] = tele_data.right_ctrl_squeezeValue
             elif args.ee == "dex1" and args.input_mode == "controller":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_ctrl_triggerValue
@@ -308,13 +323,14 @@ if __name__ == '__main__':
             
             # high level control
             if args.input_mode == "controller" and args.motion:
-                # quit teleoperate
+                # quit teleoperater
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
                 # command robot to enter damping mode. soft emergency stop function
                 if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                    loco_wrapper.Damp()
+                    # loco_wrapper.Enter_Damp_Mode() # Damp()
+                    print('no debug')
                 # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
                 loco_wrapper.Move(-tele_data.left_ctrl_thumbstickValue[1] * 0.3,
                                   -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
@@ -330,6 +346,16 @@ if __name__ == '__main__':
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+
+            # [DBG-G123] trace vertical tracking through the whole chain
+            _dbg_i = locals().get('_dbg_i', 0) + 1
+            if _dbg_i % 15 == 0:
+                logger_mp.info(
+                    f"[DBG-G123] L_tgt_z={tele_data.left_wrist_pose[2,3]:+.3f} "
+                    f"R_tgt_z={tele_data.right_wrist_pose[2,3]:+.3f} | "
+                    f"curr arm q[0,3,5,8]={current_lr_arm_q[0]:+.3f},{current_lr_arm_q[3]:+.3f},{current_lr_arm_q[5]:+.3f},{current_lr_arm_q[8]:+.3f} | "
+                    f"sol L_sh_pitch={sol_q[0]:+.3f} L_elbow={sol_q[3]:+.3f} R_sh_pitch={sol_q[5]:+.3f} R_elbow={sol_q[8]:+.3f}"
+                )
 
             # record data
             if args.record:

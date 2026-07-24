@@ -20,9 +20,13 @@ kTopicbraincoRightState = "rt/brainco/right/state"
 
 class Brainco_Controller:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False,
+                       input_mode = "hand"):
         logger_mp.info("Initialize Brainco_Controller...")
         self.fps = fps
+        # "hand": retarget a 25-joint hand skeleton to finger motors.
+        # "controller": element 0 of each hand array carries a grip closure scalar [0,1].
+        self.input_mode = input_mode
         self.hand_sub_ready = False
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
@@ -124,7 +128,19 @@ class Brainco_Controller:
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
-                if not np.all(right_hand_data == 0.0) and not np.all(left_hand_data[4] == np.array([-1.13, 0.3, 0.15])): # if hand data has been initialized.
+                if self.input_mode == "controller":
+                    # Controller mode: the main loop writes two closure scalars [0,1]
+                    # (0 open, 1 closed) into each hand array: element 0 = fingers
+                    # (index/middle/ring/pinky), element 1 = thumb (thumb + thumb-aux).
+                    # Motor order is [thumb, thumb-aux, index, middle, ring, pinky];
+                    # retargeting is not used.
+                    left_fingers  = float(np.clip(left_hand_data.flat[0], 0.0, 1.0))
+                    left_thumb    = float(np.clip(left_hand_data.flat[1], 0.0, 1.0))
+                    right_fingers = float(np.clip(right_hand_data.flat[0], 0.0, 1.0))
+                    right_thumb   = float(np.clip(right_hand_data.flat[1], 0.0, 1.0))
+                    left_q_target  = np.array([left_thumb,  left_thumb,  left_fingers,  left_fingers,  left_fingers,  left_fingers])
+                    right_q_target = np.array([right_thumb, right_thumb, right_fingers, right_fingers, right_fingers, right_fingers])
+                elif not np.all(right_hand_data == 0.0) and not np.all(left_hand_data[4] == np.array([-1.13, 0.3, 0.15])): # if hand data has been initialized.
                     ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
                     ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
 
