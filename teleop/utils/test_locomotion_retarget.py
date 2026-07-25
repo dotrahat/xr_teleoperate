@@ -163,8 +163,8 @@ def _standing(x=0.0, y=0.0, yaw=0.0, z=1.5, neck=0.10):
 def _settle(retargeter, pose, t0, enable=True, n=6, dt=0.033):
     """Push a fixed pose repeatedly so the moving-average filter converges.
 
-    Only safe when the pose does not TRANSLATE far from the previous one -- a big step in a
-    single frame is (correctly) treated as a tracking glitch. Use _approach for translation.
+    A held pose translates nowhere, so speed-matched vx/vy stay zero -- this converges the
+    ROTATION channel (roll->wz is an angle-based rate command). Use _walk for translation.
     """
     twist = None
     for i in range(n):
@@ -175,28 +175,24 @@ def _settle(retargeter, pose, t0, enable=True, n=6, dt=0.033):
     return twist
 
 
-def _approach(retargeter, t0, x=0.0, y=0.0, yaw=0.0, start=(0.0, 0.0, 0.0),
-              enable=True, dt=0.033, step_m=0.08, hold=8):
-    """Move the neck pivot from `start` to (x, y, yaw) the way a real operator would.
+def _walk(retargeter, t0, vx=0.0, vy=0.0, yaw=0.0, start=(0.0, 0.0),
+          enable=True, dt=0.033, n=10):
+    """Walk the neck pivot at a CONSTANT operator velocity (vx forward, vy left, m/s).
 
-    Increments stay below LocoTuning.jump_pos_m, because jump rejection deliberately treats a
-    >0.15 m single-frame move (>4.5 m/s at 30 Hz) as a tracking relocalisation and invalidates
-    the calibration. Then holds so the moving-average filter converges.
+    Translation is speed-matched, so what the robot does depends on how fast the operator is
+    *moving*, not where they are. This drives a steady velocity for n frames (long enough for
+    the moving-average filter to converge) and returns the twist during that steady walk. The
+    caller must have already produced the deadman rising edge at the same `start`/`yaw`, so the
+    first frame here has a valid dt from that engagement.
     """
-    sx, sy, syaw = start
-    distance = math.hypot(x - sx, y - sy)
-    steps = max(1, int(math.ceil(distance / step_m)))
+    fwd = np.array([math.cos(yaw), math.sin(yaw)])
+    left = np.array([-math.sin(yaw), math.cos(yaw)])
+    pos = np.array(start, dtype=float)
     t = t0
     twist = None
-    for i in range(1, steps + 1):
-        f = i / steps
-        twist = retargeter.update(
-            _standing(sx + (x - sx) * f, sy + (y - sy) * f, syaw + (yaw - syaw) * f), enable, t)
-        t += dt
-    for i in range(hold):
-        pose = _standing(x, y, yaw)
-        pose[0, 3] += 1e-9 * i      # sub-micron jitter: a live feed is never bit-identical
-        twist = retargeter.update(pose, enable, t)
+    for _ in range(n):
+        pos = pos + (vx * fwd + vy * left) * dt
+        twist = retargeter.update(_standing(pos[0], pos[1], yaw), enable, t)
         t += dt
     return twist
 
@@ -208,83 +204,99 @@ def test_no_motion_until_deadman_held():
     assert r.status["reason"] == "deadman released"
 
 
-def test_leaning_forward_after_engage_walks_forward():
+def test_walking_forward_after_engage_walks_forward():
     r = HeadLocomotionRetargeter(LocoTuning())
-    r.update(_standing(), True, 0.0)                    # rising edge calibrates here
-    twist = _approach(r, 0.033, x=0.45)
+    r.update(_standing(), True, 0.0)                    # rising edge locks heading + baseline
+    twist = _walk(r, 0.033, vx=0.7)                     # brisk forward walk
     assert twist.vx > 0.3, twist
     assert abs(twist.vy) < 1e-6
     assert abs(twist.wz) < 1e-6
 
 
-def test_stepping_left_strafes_left():
+def test_standing_still_stops_even_while_deadman_held():
+    """The whole point of speed-matching: stop when the operator stops, fist still closed."""
     r = HeadLocomotionRetargeter(LocoTuning())
     r.update(_standing(), True, 0.0)
-    twist = _approach(r, 0.033, y=0.45)
+    pos, t = 0.0, 0.033
+    twist = None
+    for _ in range(10):                                 # walk forward, well clear of neutral
+        pos += 0.7 * 0.033
+        twist = r.update(_standing(x=pos), True, t)
+        t += 0.033
+    assert twist.vx > 0.3, twist
+    # Now stand still at that spot, fist STILL closed. The old ratchet kept walking; speed-
+    # matching must stop within the filter window.
+    for _ in range(6):
+        twist = r.update(_standing(x=pos), True, t)
+        t += 0.033
+    assert twist.is_zero(), f"standing still must stop, got {twist}"
+    assert r.status["reason"] == "ok"
+
+
+def test_walking_left_strafes_left():
+    r = HeadLocomotionRetargeter(LocoTuning())
+    r.update(_standing(), True, 0.0)
+    twist = _walk(r, 0.033, vy=0.9)
     assert twist.vy > 0.2, twist
     assert abs(twist.vx) < 1e-6
 
 
-def test_displacement_inside_deadzone_is_ignored():
+def test_slow_drift_inside_deadzone_is_ignored():
     r = HeadLocomotionRetargeter(LocoTuning())
     r.update(_standing(), True, 0.0)
-    twist = _approach(r, 0.033, x=0.08)                 # < 0.10 m deadzone
+    twist = _walk(r, 0.033, vx=0.08)                    # < 0.12 m/s deadzone: idle sway
     assert twist.is_zero(), twist
 
 
-def test_calibration_is_relative_so_absolute_position_does_not_matter():
-    """Engaging anywhere in the room gives the same twist for the same relative step."""
+def test_speed_matching_is_position_independent():
+    """Walking at the same speed gives the same twist regardless of where in the room."""
     results = []
     for origin in ((0.0, 0.0), (3.0, -2.0), (-7.5, 11.25)):
         r = HeadLocomotionRetargeter(LocoTuning())
         r.update(_standing(x=origin[0], y=origin[1]), True, 0.0)
-        twist = _approach(r, 0.033, x=origin[0] + 0.45, y=origin[1],
-                          start=(origin[0], origin[1], 0.0))
+        twist = _walk(r, 0.033, vx=0.7, start=origin)
         results.append(twist.as_list())
     for value in results[1:]:
         assert np.allclose(value, results[0], atol=1e-9), results
 
 
-def test_displacement_is_projected_onto_neutral_heading():
-    """Facing +y at calibration, a step along world +y must read as FORWARD, not lateral."""
+def test_velocity_is_projected_onto_engagement_heading():
+    """Facing +y at engagement, walking along world +y must read as FORWARD, not lateral."""
     r = HeadLocomotionRetargeter(LocoTuning())
     yaw = math.pi / 2
     r.update(_standing(yaw=yaw), True, 0.0)
-    twist = _approach(r, 0.033, x=0.0, y=0.45, yaw=yaw, start=(0.0, 0.0, yaw))
+    twist = _walk(r, 0.033, vx=0.7, yaw=yaw)            # vx is operator-forward = world +y here
     assert twist.vx > 0.3, twist
     assert abs(twist.vy) < 1e-6, twist
 
 
-def test_release_zeroes_instantly_and_reengage_recalibrates_the_ratchet():
-    tuning = LocoTuning()
-    r = HeadLocomotionRetargeter(tuning)
+def test_release_zeroes_instantly_and_reengage_resets_baseline():
+    r = HeadLocomotionRetargeter(LocoTuning())
     r.update(_standing(), True, 0.0)
-    walking = _approach(r, 0.033, x=0.45)
-    assert walking.vx > 0.3
+    assert _walk(r, 0.033, vx=0.7).vx > 0.3
 
-    released = r.update(_standing(x=0.45), False, 1.0)
+    released = r.update(_standing(x=1.0), False, 1.0)
     assert released.is_zero(), "releasing the deadman must zero immediately"
 
-    # Re-engaging at the displaced spot makes THAT the new neutral -> no residual command.
-    r.update(_standing(x=0.45), True, 1.1)
-    twist = _approach(r, 1.2, x=0.45, start=(0.45, 0.0, 0.0))
-    assert twist.is_zero(), f"re-engage must recalibrate, got {twist}"
+    # Re-engage at the new spot: the first frame has no dt yet, so it must not lurch.
+    reengage = r.update(_standing(x=1.0), True, 1.1)
+    assert reengage.is_zero(), f"re-engage frame must not command motion, got {reengage}"
 
 
 def test_jump_rejection_latches_until_deadman_is_recycled():
-    """After a tracking glitch the old neutral is meaningless, so it stays stopped until
-    the operator releases and re-engages. Discoverable: the robot simply stops."""
+    """A tracking teleport invalidates the heading lock; it stays stopped until the operator
+    releases and re-engages. Discoverable: the robot simply stops."""
     r = HeadLocomotionRetargeter(LocoTuning())
     r.update(_standing(), True, 0.0)
-    _approach(r, 0.033, x=0.2)
-    assert r.update(_standing(x=9.0), True, 1.0).is_zero()
-    # Still held: no recalibration happens, so it stays zero.
-    assert _approach(r, 1.1, x=9.2, start=(9.0, 0.0, 0.0)).is_zero()
+    _walk(r, 0.033, vx=0.7, n=4)
+    assert r.update(_standing(x=9.0), True, 1.0).is_zero()   # >0.15 m single frame
+    # Still held: no re-engagement, so it stays zero.
+    assert _walk(r, 1.1, vx=0.7, start=(9.0, 0.0)).is_zero()
     assert r.status["reason"] == "not calibrated"
     # Release + re-engage restores control.
     r.update(_standing(x=9.2), False, 2.0)
     r.update(_standing(x=9.2), True, 2.1)
-    assert _approach(r, 2.2, x=9.65, start=(9.2, 0.0, 0.0)).vx > 0.3
+    assert _walk(r, 2.2, vx=0.7, start=(9.2, 0.0)).vx > 0.3
 
 
 def test_roll_turns_and_gaze_yaw_does_not():
@@ -319,17 +331,24 @@ def test_yaw_mode_off_never_turns():
 
 
 def test_stale_pose_stops_the_robot():
-    """A frozen feed (headset removed) must not keep a lean alive."""
-    tuning = LocoTuning(stale_timeout_s=0.5)
-    r = HeadLocomotionRetargeter(tuning)
-    r.update(_standing(), True, 0.0)
-    assert _approach(r, 0.033, x=0.45).vx > 0.3
+    """A frozen feed (headset removed) must not keep a TURN alive.
 
-    # Exactly the same matrix from here on: the feed is dead but still perfectly valid,
-    # which is precisely what safe_mat_update cannot catch.
-    frozen = _standing(x=0.45)
-    still_walking = r.update(frozen, True, 1.0)          # first identical frame starts the clock
-    assert still_walking.vx > 0.3, "should not stop before the timeout"
+    Speed-matched translation already stops on a frozen feed (zero velocity), but turning is a
+    rate command from head tilt: a frozen mid-tilt pose would otherwise keep steering forever.
+    This is exactly what safe_mat_update (tv_wrapper.py:70) cannot catch -- the matrix is still
+    perfectly valid.
+    """
+    tuning = LocoTuning(stale_timeout_s=0.5)
+    r = HeadLocomotionRetargeter(tuning, yaw_mode="roll")
+    base = _standing()
+    r.update(base, True, 0.0)
+    tilted = base.copy()
+    tilted[:3, :3] = _rot_x(-0.5)                        # tilt left -> +wz
+    assert _settle(r, tilted, 0.1).wz > 0.3
+
+    frozen = tilted.copy()
+    still_turning = r.update(frozen, True, 1.0)          # first identical frame starts the clock
+    assert still_turning.wz > 0.3, "should not stop before the timeout"
     twist = r.update(frozen, True, 1.6)                  # 0.6 s > 0.5 s timeout
     assert twist.is_zero(), "stale pose must zero the twist"
     assert r.status["reason"] == "stale head pose"
@@ -358,14 +377,9 @@ def test_speeds_never_exceed_configured_limits():
     tuning = LocoTuning(max_vx=0.4, max_vy=0.25, max_wz=0.6)
     r = HeadLocomotionRetargeter(tuning)
     r.update(_standing(), True, 0.0)
-    # Walk out to the saturation region in steps small enough to dodge jump rejection.
-    t = 0.1
-    twist = None
-    pose_x = 0.0
-    while pose_x < 1.2:
-        pose_x += 0.12
-        twist = r.update(_standing(x=pose_x), True, t)
-        t += 0.033
+    # Sprint well past walk_full (0.80 m/s) so the shaped axis saturates, but stay under
+    # max_step_ms (3.0) so it is not rejected as a glitch.
+    twist = _walk(r, 0.1, vx=1.6, n=12)
     assert twist.vx <= tuning.max_vx + 1e-9, twist
     assert abs(twist.vy) <= tuning.max_vy + 1e-9
     assert abs(twist.wz) <= tuning.max_wz + 1e-9

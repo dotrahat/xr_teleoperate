@@ -3,11 +3,16 @@
 # Pure math: no threads, no IO, no vuer, no DDS, so it can be unit-tested offline against
 # hand-built SE(3) matrices. Transport and timing live in locomotion_publisher.py.
 #
-# The operator's *displacement from a calibrated neutral* sets velocity. That covers both
-# leaning and physically stepping -- Quest 3's inside-out SLAM makes head translation a true
-# room-scale position, so stepping forward and STAYING there is a sustained walk command.
-# Releasing the deadman re-calibrates, which gives a ratchet: step -> release -> walk back ->
-# re-engage. A small room therefore yields unlimited robot travel.
+# Translation is SPEED-MATCHED: the robot's forward/strafe velocity tracks the operator's own
+# walking velocity (rate of head translation), not displacement. Walk -> robot walks; stand
+# still -> robot stops, even with the deadman still held and even if you are far from where you
+# engaged. Quest 3's inside-out SLAM gives true room-scale head position, which we differentiate
+# per frame to recover that walking velocity. To cover more ground than the room allows: release
+# the deadman (robot stops), physically walk back to centre (robot stays put), re-engage.
+#
+# Turning is a separate model -- head ROLL/tilt as a rate command (tilt and hold = keep turning,
+# head upright = stop). It is joystick-like and self-centring, and stays fully decoupled from
+# gaze so the operator can look anywhere without steering.
 #
 # Frame: tv_wrapper hands us head_pose already in ROBOT convention (x front, y left, z up),
 # via Brobot_world_head = T_ROBOT_OPENXR @ Bxr_world_head @ T_OPENXR_ROBOT (tv_wrapper.py:282).
@@ -41,13 +46,19 @@ ZERO_TWIST = Twist(0.0, 0.0, 0.0, 0.8)
 
 @dataclass
 class LocoTuning:
-    """Defaults are STEP-scaled, not lean-scaled: the operator physically walks."""
+    """Translation is speed-matched (operator walking speed -> robot speed)."""
     max_vx: float = 0.40
     max_vy: float = 0.25
     max_wz: float = 0.60
 
-    step_deadzone_m: float = 0.10   # absorbs the ~+-5 cm lateral sway of natural walking
-    step_full_m: float = 0.45       # displacement giving full commanded speed
+    # Speed-matching thresholds, in m/s of operator head motion. Natural sway while standing is
+    # ~0.05-0.10 m/s, so the deadzone rejects it; a brisk walk is ~0.8-1.2 m/s, so walking near
+    # walk_full_ms commands full robot speed.
+    walk_deadzone_ms: float = 0.12  # operator speed ignored before the robot starts to walk
+    walk_full_ms: float = 0.80      # operator speed giving full commanded robot speed
+    # First engaged frame(s) after calibration have no reliable dt; ignore samples faster than
+    # this (differentiation of a large re-engage step would otherwise spike the velocity).
+    max_step_ms: float = 3.0
 
     roll_deadzone_rad: float = 0.17  # 10 deg
     roll_full_rad: float = 0.52      # 30 deg
@@ -177,10 +188,13 @@ class HeadLocomotionRetargeter:
         self._prev_yaw = None
         self._last_change_time = None
         self._prev_walk_enable = False
+        # Velocity baseline for speed-matching (set on the deadman rising edge).
+        self._vel_prev_pos = None
+        self._vel_prev_time = None
         self._stale = False
         self._filter = WeightedMovingFilter(np.array(self.tuning.filter_weights), 3)
         self._status = {"calibrated": False, "stale": False, "reason": "reset",
-                        "fwd_m": 0.0, "lat_m": 0.0, "roll_rad": 0.0}
+                        "fwd_ms": 0.0, "lat_ms": 0.0, "roll_rad": 0.0}
 
     @property
     def status(self):
@@ -188,7 +202,7 @@ class HeadLocomotionRetargeter:
 
     def _zero(self, reason):
         self._status.update(calibrated=self._calibrated, stale=self._stale, reason=reason,
-                            fwd_m=0.0, lat_m=0.0, roll_rad=0.0)
+                            fwd_ms=0.0, lat_ms=0.0, roll_rad=0.0)
         # Never let a stale filter history bleed into the next engagement.
         self._filter = WeightedMovingFilter(np.array(self.tuning.filter_weights), 3)
         return Twist(0.0, 0.0, 0.0, self.tuning.height)
@@ -240,23 +254,39 @@ class HeadLocomotionRetargeter:
         self._prev_position = position
         self._prev_yaw = yaw
 
-        # 4. Deadman edges. Rising edge calibrates here and now -- this IS the ratchet.
+        # 4. Deadman edges. Rising edge locks the operator's heading (which way "forward" is)
+        #    and resets the velocity baseline, so the first engaged frame reports zero speed.
         rising = walk_enable and not self._prev_walk_enable
         self._prev_walk_enable = walk_enable
         if rising:
             self._calibrate(position, yaw)
+            self._vel_prev_pos = position.copy()
+            self._vel_prev_time = now
         if not walk_enable:
             self._calibrated = False
+            self._vel_prev_pos = None
+            self._vel_prev_time = None
             return self._zero("deadman released")
         if not self._calibrated:
             return self._zero("not calibrated")
 
-        # 5. Displacement -> vx, vy, projected onto the neutral heading.
-        delta = position - self._p0
-        forward_m = float(delta @ self._f0)
-        lateral_m = float(delta @ self._l0)
-        vx = shaped_axis(forward_m, tuning.step_deadzone_m, tuning.step_full_m, tuning.max_vx)
-        vy = shaped_axis(lateral_m, tuning.step_deadzone_m, tuning.step_full_m, tuning.max_vy)
+        # 5. Speed-matching: differentiate head position to recover the operator's walking
+        #    velocity, projected onto the heading locked at engagement. Standing still -> ~0
+        #    speed -> robot stops, regardless of where the operator is standing.
+        dt = now - self._vel_prev_time if self._vel_prev_time is not None else 0.0
+        step = position - self._vel_prev_pos if self._vel_prev_pos is not None else position * 0.0
+        self._vel_prev_pos = position.copy()
+        self._vel_prev_time = now
+        if dt <= 1e-4:
+            # No usable time base yet (engage frame, or a repeated timestamp): command nothing.
+            return self._zero("no dt")
+        forward_ms = float(step @ self._f0) / dt
+        lateral_ms = float(step @ self._l0) / dt
+        # A single frame faster than any real walk is a tracking glitch, not locomotion.
+        if abs(forward_ms) > tuning.max_step_ms or abs(lateral_ms) > tuning.max_step_ms:
+            return self._zero(f"speed glitch ({forward_ms:+.1f},{lateral_ms:+.1f} m/s)")
+        vx = shaped_axis(forward_ms, tuning.walk_deadzone_ms, tuning.walk_full_ms, tuning.max_vx)
+        vy = shaped_axis(lateral_ms, tuning.walk_deadzone_ms, tuning.walk_full_ms, tuning.max_vy)
 
         # Roll -> wz. Deliberately NOT head yaw: the headset shows the robot's fixed camera,
         # so turning your head does not change the view and there is no natural cue to stop
@@ -266,10 +296,21 @@ class HeadLocomotionRetargeter:
         else:
             wz = 0.0
 
-        # 6. Smooth. Bypassed entirely by every zero path above.
+        # 6. Idle -> stop cleanly. WeightedMovingFilter.add_data DEDUPES bit-identical samples,
+        #    and shaped_axis clamps every sub-threshold input to exactly 0.0, so once the
+        #    operator is inside the deadzone the filter would be fed a repeated [0,0,0], skip it,
+        #    and FREEZE at the last half-blended value -- the robot would creep forever after you
+        #    stop. So when nothing is commanded, bypass the filter, reset it, and hard-zero.
+        if abs(vx) < 1e-9 and abs(vy) < 1e-9 and abs(wz) < 1e-9:
+            self._filter = WeightedMovingFilter(np.array(tuning.filter_weights), 3)
+            self._status.update(calibrated=True, stale=False, reason="ok",
+                                fwd_ms=forward_ms, lat_ms=lateral_ms, roll_rad=roll)
+            return Twist(0.0, 0.0, 0.0, tuning.height)
+
+        # 7. Smooth. Bypassed entirely by every zero path above and by the idle bypass.
         self._filter.add_data(np.array([vx, vy, wz]))
         smoothed = self._filter.filtered_data
 
         self._status.update(calibrated=True, stale=False, reason="ok",
-                            fwd_m=forward_m, lat_m=lateral_m, roll_rad=roll)
+                            fwd_ms=forward_ms, lat_ms=lateral_ms, roll_rad=roll)
         return Twist(float(smoothed[0]), float(smoothed[1]), float(smoothed[2]), tuning.height)

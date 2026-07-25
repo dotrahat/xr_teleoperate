@@ -94,7 +94,7 @@ if __name__ == '__main__':
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # head/body-driven locomotion (third mode). All opt-in: defaults preserve existing behaviour.
-    parser.add_argument('--head-loco', action='store_true', help='Enable head/body-driven locomotion (lean or physically step to walk)')
+    parser.add_argument('--head-loco', action='store_true', help='Enable head/body-driven locomotion (walk to walk, stand still to stop; speed-matched)')
     parser.add_argument('--loco-yaw-source', type=str, choices=['roll', 'off'], default='roll', help='How to steer: head roll (tilt) or no turning at all')
     parser.add_argument('--loco-deadman', type=str, default='left_fist',
                         choices=['left_fist', 'right_fist', 'both_fist', 'left_pinch', 'right_pinch', 'left_trigger', 'right_trigger', 'none'],
@@ -102,8 +102,8 @@ if __name__ == '__main__':
     parser.add_argument('--loco-max-vx', type=float, default=0.40, help='Max forward/back speed (m/s)')
     parser.add_argument('--loco-max-vy', type=float, default=0.25, help='Max lateral speed (m/s)')
     parser.add_argument('--loco-max-wz', type=float, default=0.60, help='Max yaw rate (rad/s)')
-    parser.add_argument('--loco-step-deadzone', type=float, default=0.10, help='Displacement ignored before walking starts (m)')
-    parser.add_argument('--loco-step-full', type=float, default=0.45, help='Displacement giving full speed (m)')
+    parser.add_argument('--loco-walk-deadzone', type=float, default=0.12, help='Operator walking speed ignored before the robot starts (m/s)')
+    parser.add_argument('--loco-walk-full', type=float, default=0.80, help='Operator walking speed giving full robot speed (m/s)')
     parser.add_argument('--loco-neck-offset', type=float, default=0.10, help='Camera-to-neck-pivot distance (m)')
     parser.add_argument('--loco-rate', type=float, default=None, help='Publisher rate (Hz). Default 100 in sim, 30 on hardware.')
     parser.add_argument('--loco-sign', type=str, default='1,1,1', help='Wire sign per axis "vx,vy,wz". Measured on G129 Inspire wholebody; re-verify per policy with loco_sign_probe.py.')
@@ -316,8 +316,8 @@ if __name__ == '__main__':
                 LocoTuning(max_vx=args.loco_max_vx,
                            max_vy=args.loco_max_vy,
                            max_wz=args.loco_max_wz,
-                           step_deadzone_m=args.loco_step_deadzone,
-                           step_full_m=args.loco_step_full,
+                           walk_deadzone_ms=args.loco_walk_deadzone,
+                           walk_full_ms=args.loco_walk_full,
                            neck_offset_m=args.loco_neck_offset,
                            height=args.loco_height),
                 yaw_mode=args.loco_yaw_source)
@@ -357,8 +357,8 @@ if __name__ == '__main__':
                            f"{'  (tilt head left/right)' if args.loco_yaw_source == 'roll' else ''}")
             logger_mp.info(f"    limits        : vx<={args.loco_max_vx} vy<={args.loco_max_vy} "
                            f"wz<={args.loco_max_wz}")
-            logger_mp.info("    engaging the deadman calibrates your neutral pose THERE;")
-            logger_mp.info("    release + re-engage to re-centre (the 'ratchet').")
+            logger_mp.info("    walk to walk, stand still to stop (speed-matched);")
+            logger_mp.info("    to cover more ground: release, walk back, re-engage.")
             logger_mp.info("⚠️  YOU ARE BLIND TO YOUR REAL SURROUNDINGS WHILE WALKING.")
             logger_mp.info("⚠️  Clear your space, set your guardian, and have a spotter.")
         READY = True                  # now ready to (1) enter START state
@@ -420,7 +420,7 @@ if __name__ == '__main__':
                         st = loco_retarget.status
                         logger_mp.info(
                             f"[loco] deadman={'HELD' if walk_enable else 'open'} "
-                            f"fwd={st['fwd_m']:+.3f}m lat={st['lat_m']:+.3f}m "
+                            f"fwd={st['fwd_ms']:+.2f}m/s lat={st['lat_ms']:+.2f}m/s "
                             f"roll={st['roll_rad']:+.2f}rad -> "
                             f"vx={twist.vx:+.3f} vy={twist.vy:+.3f} wz={twist.wz:+.3f} "
                             f"({st['reason']})")
