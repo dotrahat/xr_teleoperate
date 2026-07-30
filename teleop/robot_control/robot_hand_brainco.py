@@ -148,9 +148,12 @@ class Brainco_Controller:
                     right_q_target = self.hand_retargeting.right_retargeting.retarget(ref_right_value)[self.hand_retargeting.right_dex_retargeting_to_hardware]
 
                     # In the official document, the angles are in the range [0, 1] ==> 0.0: fully open  1.0: fully closed
-                    # The q_target now is in radians, ranges:
-                    #     - idx 0:   0~1.52
-                    #     - idx 1:   0~1.05
+                    # q_target is in radians and is already in hardware motor order
+                    # [thumb, thumb-aux, index, middle, ring, pinky]; each entry must be
+                    # normalized by the limit of the URDF joint that feeds it (see
+                    # hand_retargeting.py: motor 0 <- thumb_proximal, motor 1 <- thumb_metacarpal):
+                    #     - idx 0:   0~1.05  (thumb flexion,  *_thumb_proximal_joint)
+                    #     - idx 1:   0~1.52  (thumb rotation, *_thumb_metacarpal_joint)
                     #     - idx 2~5: 0~1.47
                     # We normalize them using (max - value) / range
                     def normalize(val, min_val, max_val):
@@ -158,11 +161,11 @@ class Brainco_Controller:
 
                     for idx in range(brainco_Num_Motors):
                         if idx == 0:
-                            left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.52)
-                            right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.52)
-                        elif idx == 1:
                             left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.05)
                             right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.05)
+                        elif idx == 1:
+                            left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.52)
+                            right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.52)
                         elif idx >= 2:
                             left_q_target[idx]  = normalize(left_q_target[idx], 0.0, 1.47)
                             right_q_target[idx] = normalize(right_q_target[idx], 0.0, 1.47)
