@@ -59,7 +59,7 @@ class DataBuffer:
             self.data = data
 
 class G1_29_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = True):
+    def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
@@ -339,7 +339,7 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class G1_23_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = True):
+    def __init__(self, motion_mode = False, simulation_mode = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
 
