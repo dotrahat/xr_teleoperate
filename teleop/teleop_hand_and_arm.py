@@ -83,6 +83,10 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    parser.add_argument('--debug-mode', action = 'store_true',
+                        help = 'Explicitly allow Debug Mode (raw rt/lowcmd, balance controller '
+                               'disabled) on hardware when --motion is not set. Required to '
+                               'start without --motion on hardware; has no effect with --sim.')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
@@ -96,6 +100,22 @@ if __name__ == '__main__':
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
 
     args = parser.parse_args()
+
+    # --- hardware debug-mode guard -------------------------------------------------------
+    # Without --motion, arm commands go out on raw rt/lowcmd via Enter_Debug_Mode(), which
+    # disables the robot's internal balance controller entirely. On hardware this is one
+    # missing flag away from happening by accident, and disastrous if the robot isn't
+    # supported by a gantry. Require an explicit opt-in before allowing that path; refuse to
+    # start rather than silently dropping into Debug Mode. --sim has no physical robot to
+    # endanger and its normal workflow already omits --motion, so this does not apply there.
+    if not args.sim and not args.motion and not args.debug_mode:
+        parser.error(
+            "Refusing to start: --motion is not set. Without it, this program enters the "
+            "robot's raw Debug Mode (rt/lowcmd), which disables the internal balance "
+            "controller -- the robot will not hold itself up if unsupported. Pass --motion "
+            "for normal operation, or --debug-mode to explicitly acknowledge and allow "
+            "Debug Mode.")
+
     logger_mp.info(f"args: {args}")
 
     try:
