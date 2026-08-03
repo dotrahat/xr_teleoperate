@@ -567,24 +567,36 @@ if __name__ == '__main__':
                     if tele_data.right_ctrl_aButton:
                         START = False
                         STOP = True
-                    # soft emergency stop. Zero the publisher first so the held setpoint cannot
-                    # be re-sent by the publisher thread a few ms after damping.
-                    if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                        loco_pub.zero()
-                        if loco_toggle is not None:
-                            loco_toggle.state = False
-                        if loco_wrapper is not None:
-                            loco_wrapper.Enter_Damp_Mode()
+                    # DELIBERATELY DISABLED -- do not re-enable without asking.
+                    # Upstream damps the robot when both thumbsticks are clicked. Damping
+                    # cuts the motors, so the robot drops where it stands; the click is far
+                    # too easy to trigger by accident while driving with the sticks, and the
+                    # cost of a false positive is a fall. Stop with [q] or the A button, or
+                    # use the hardware e-stop.
+                    #
+                    # if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
+                    #     loco_pub.zero()
+                    #     if loco_toggle is not None:
+                    #         loco_toggle.state = False
+                    #     if loco_wrapper is not None:
+                    #         loco_wrapper.Enter_Damp_Mode()
             elif args.input_mode == "controller" and args.motion:
                 # quit teleoperater
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
-                # command robot to enter damping mode. soft emergency stop function
-                if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                    # LocoClientWrapper exposes Enter_Damp_Mode(), not Damp() -- calling
-                    # loco_wrapper.Damp() here raises AttributeError and kills the e-stop.
-                    loco_wrapper.Enter_Damp_Mode()
+                # DELIBERATELY DISABLED -- do not re-enable without asking.
+                # Upstream damps the robot when both thumbsticks are clicked. Damping cuts
+                # the motors, so the robot drops where it stands; the click is far too easy
+                # to trigger by accident while driving with the sticks, and the cost of a
+                # false positive is a fall. Stop with [q] or the A button, or use the
+                # hardware e-stop.
+                #
+                # (Upstream's own call is loco_wrapper.Damp(), which would raise
+                # AttributeError anyway -- LocoClientWrapper only exposes Enter_Damp_Mode.)
+                #
+                # if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
+                #     loco_wrapper.Enter_Damp_Mode()
                 # https://github.com/unitreerobotics/xr_teleoperate/issues/135, control, limit velocity to within 0.3
                 loco_wrapper.Move(-tele_data.left_ctrl_thumbstickValue[1] * 0.3,
                                   -tele_data.left_ctrl_thumbstickValue[0] * 0.3,
