@@ -80,6 +80,12 @@ if __name__ == '__main__':
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2', 'R1_A5', 'R1_A7'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
+    parser.add_argument('--arm-reference-mode', type=str, choices=['head_yaw', 'head_position'], default='head_yaw',
+                        help='Frame the wrist targets are expressed in. '
+                             '"head_yaw" (upstream v1.6 default) rotates targets by the operator\'s '
+                             'yaw, so the arms follow the direction you face. "head_position" is the '
+                             'pre-v1.6 behaviour: translation relative to the head only, orientation '
+                             'left in world frame.')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -209,8 +215,9 @@ if __name__ == '__main__':
                                      zmq=camera_config['head_camera']['enable_zmq'],
                                      webrtc=camera_config['head_camera']['enable_webrtc'],
                                      webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
-                                     arm_reference_mode="head_yaw"
+                                     arm_reference_mode=args.arm_reference_mode
                                      )
+        logger_mp.info(f"🖐️  arm reference mode: {args.arm_reference_mode}")
         
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
