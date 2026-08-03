@@ -36,11 +36,12 @@
 
 # 🔖 [版本说明](CHANGELOG_zh-CN.md)
 
-## 🏷️ v1.5 (2025.12.29)
+## 🏷️ v1.6 (2026.7.29)
 
-- 支持**仿真模式**
-- 添加 cyclonedds 网卡名称参数
-- [引入缓存机制以加速 URDF 加载](https://github.com/unitreerobotics/xr_teleoperate/commit/6cab654620735bfa347c1cd32a0d8c0c1e6ec343)
+- 支持 **H2** 机器人
+- 支持 **R1** 机器人（`R1_A5` / `R1_A7`）
+- 支持 **BrainCo** 灵巧手手柄输入控制
+- 默认采用基于头部偏航（head-yaw）的手臂参考系
 - ...
 
 
@@ -83,6 +84,18 @@
   </tr>
   <tr>
     <td style="text-align: center;"> <a href="https://www.unitree.com/cn/h1" target="_blank"> H1_2 (手臂7自由度) </td>
+    <td style="text-align: center;"> &#9989; 完成 </td>
+  </tr>
+  <tr>
+    <td style="text-align: center;"> <a href="https://www.unitree.com/cn/h2" target="_blank"> H2 </td>
+    <td style="text-align: center;"> &#9989; 完成 </td>
+  </tr>
+  <tr>
+    <td style="text-align: center;"> <a href="https://www.unitree.com/cn/R1" target="_blank"> R1 (手臂5自由度) </td>
+    <td style="text-align: center;"> &#9989; 完成 </td>
+  </tr>
+  <tr>
+    <td style="text-align: center;"> <a href="https://www.unitree.com/cn/R1" target="_blank"> R1 (手臂7自由度) </td>
     <td style="text-align: center;"> &#9989; 完成 </td>
   </tr>
   <tr>
@@ -223,7 +236,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |     `--frequency`     |                     设置录制和控制的 FPS                     |                    任意正常范围内的浮点数                    |       30.0        |
 |    `--input-mode`     |          选择 XR 输入模式（通过什么方式控制机器人）          |   `hand`（**手势跟踪**）<br />`controller`（**手柄跟踪**）   |      `hand`       |
 |   `--display-mode`    |        选择 XR 显示模式（通过什么方式查看机器人视角）        | `immersive`（沉浸式）<br />`ego`（通透+第一人称小窗）<br />`pass-through`（通透） |    `immersive`    |
-|        `--arm`        |            选择机器人设备类型（可参考 0. 📖 介绍）            |          `G1_29`<br />`G1_23`<br />`H1_2`<br />`H1`          |      `G1_29`      |
+|        `--arm`        |            选择机器人设备类型（可参考 0. 📖 介绍）            | `G1_29`<br />`G1_23`<br />`H1_2`<br />`H1`<br />`H2`<br />`R1_A5`<br />`R1_A7` |      `G1_29`      |
 |        `--ee`         |       选择手臂的末端执行器设备类型（可参考 0. 📖 介绍）       | `dex1`<br />`dex3`<br />`inspire_ftp`<br />`inspire_dfx`<br />`brainco` |     无默认值      |
 |   `--img-server-ip`   | 设置图像服务器的 IP 地址，用于接收图像服务流、配置 WebRTC 信令服务地址 |                         `IPv4` 地址                          | `192.168.123.164` |
 | `--network-interface` |                设置 cyclonedds 通信的网卡接口                |                           网卡名称                           |      `None`       |
@@ -232,13 +245,17 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 |    ⚙️ 参数    |                            📜 说明                            |
 | :----------: | :----------------------------------------------------------: |
-|  `--motion`  | 【启用**运动控制**模式】<br />开启本模式后，可在机器人运控程序运行下进行遥操作程序。<br />**手势跟踪**模式下，可使用 [R3遥控器](https://www.unitree.com/cn/R3) 控制机器人正常行走；**手柄跟踪**模式下，也可使用[手柄摇杆控制机器人行走](https://github.com/unitreerobotics/xr_teleoperate/blob/375cdc27605de377c698e2b89cad0e5885724ca6/teleop/teleop_hand_and_arm.py#L247-L257)。 |
+|  `--motion`  | 【启用**运动控制**模式】<br />开启本模式后，可在机器人运控程序运行下进行遥操作程序。<br />**手势跟踪**模式下，可使用 [R3遥控器](https://www.unitree.com/cn/R3) 控制机器人正常行走；**手柄跟踪**模式下，也可使用[手柄摇杆控制机器人行走](https://github.com/unitreerobotics/xr_teleoperate/blob/375cdc27605de377c698e2b89cad0e5885724ca6/teleop/teleop_hand_and_arm.py#L247-L257)。<br />注意：只支持 `Regular mode` (R1+X)，不支持 `Running mode` (R2+A) |
 | `--headless` | 【启用**无图形界面**模式】<br />适用于本程序部署在开发计算单元（PC2）等无显示器情况 |
 |   `--sim`    | 【启用[**仿真模式**](https://github.com/unitreerobotics/unitree_sim_isaaclab)】 |
 |   `--ipc`    | 【进程间通信模式】<br />可通过进程间通信来控制 xr_teleoperate 程序的状态切换，此模式适合与代理程序进行交互 |
 | `--affinity` | 【CPU亲和模式】<br />设置 CPU 核心亲和性。如果你不知道这是什么，那么请不要设置它。 |
 |  `--record`  | 【启用**数据录制**模式】<br />按 **r** 键进入遥操后，按 **s** 键可开启数据录制，再次按 **s** 键可结束录制并保存本次 episode 数据。<br />继续按下 **s** 键可重复前述过程。 |
-|  `--task-*`  | 此类参数可配置录制的文件保存路径，任务目标、描述、步骤等信息 |
+| `--task-dir` | 录制数据的保存路径。默认值：`./utils/data/` |
+| `--task-name` | 录制的任务文件名。默认值：`pick cube` |
+| `--task-goal` | 写入 json 文件的任务目标。默认值：`pick up cube at desk.` |
+| `--task-desc` | 写入 json 文件的任务描述。默认值：`task description` |
+| `--task-steps` | 写入 json 文件的任务步骤。默认值：`step1: do this; step2: do that;` |
 
 
 ## 1.4 🔄 状态转移图
@@ -292,7 +309,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 
 ```bash
 (tv) unitree@Host:~$ cd ~/xr_teleoperate/teleop/
-(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --xr-mode=hand --arm=G1_29 --ee=dex3 --sim --record
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --input-mode=hand --arm=G1_29 --ee=dex3 --sim --record
 # 实际上，由于一些参数存在默认值，该命令也可简化为：
 (tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
 ```
@@ -559,3 +576,17 @@ xr_teleoperate/
 8. https://github.com/Dingry/BunnyVisionPro
 9. https://github.com/unitreerobotics/unitree_sdk2_python
 10. https://github.com/ARCLab-MIT/beavr-bot
+
+
+
+# 7. 📝 引用
+
+```
+@misc{xr-teleoperate,
+  author       = {{Unitree Robotics}},
+  title        = {{XR-Teleoperate}: An Open-Source Teleoperation Framework and Data Collection Toolkit for Embodied Intelligence},
+  howpublished = {\url{https://github.com/unitreerobotics/xr_teleoperate}},
+  year         = {2024},
+  note         = {Accessed: 2026-02}
+}
+```

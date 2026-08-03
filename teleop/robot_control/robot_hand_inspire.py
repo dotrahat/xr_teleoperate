@@ -7,11 +7,9 @@ from enum import IntEnum
 import threading
 import time
 from multiprocessing import Process, Array
-from inspire_sdkpy import inspire_dds  # lazy import
-import inspire_sdkpy.inspire_hand_defaut as inspire_hand_default
 
 import logging_mp
-logger_mp = logging_mp.get_logger(__name__)
+logger_mp = logging_mp.getLogger(__name__)
 
 Inspire_Num_Motors = 6
 kTopicInspireDFXCommand = "rt/inspire/cmd"
@@ -19,7 +17,7 @@ kTopicInspireDFXState = "rt/inspire/state"
 
 class Inspire_Controller_DFX:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
         logger_mp.info("Initialize Inspire_Controller_DFX...")
         self.fps = fps
         self.Unit_Test = Unit_Test
@@ -54,7 +52,7 @@ class Inspire_Controller_DFX:
         logger_mp.info("[Inspire_Controller_DFX] Subscribe dds ok.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
+                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, xr_motion_data_ready_in))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -83,7 +81,7 @@ class Inspire_Controller_DFX:
         # logger_mp.debug("hand ctrl publish ok.")
     
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
+                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, xr_motion_data_ready_in = None):
         self.running = True
 
         left_q_target  = np.full(Inspire_Num_Motors, 1.0)
@@ -106,11 +104,16 @@ class Inspire_Controller_DFX:
                     left_hand_data  = np.array(left_hand_array[:]).reshape(25, 3).copy()
                 with right_hand_array.get_lock():
                     right_hand_data = np.array(right_hand_array[:]).reshape(25, 3).copy()
+                if xr_motion_data_ready_in is not None:
+                    with xr_motion_data_ready_in.get_lock():
+                        xr_motion_data_ready = xr_motion_data_ready_in.value
+                else:
+                    xr_motion_data_ready = True
 
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
-                if not np.all(right_hand_data == 0.0) and not np.all(left_hand_data[4] == np.array([-1.13, 0.3, 0.15])): # if hand data has been initialized.
+                if xr_motion_data_ready:
                     ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
                     ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
 
@@ -162,10 +165,10 @@ kTopicInspireFTPRightState = "rt/inspire_hand/state/r"
 
 class Inspire_Controller_FTP:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False, xr_motion_data_ready_in = None):
         logger_mp.info("Initialize Inspire_Controller_FTP...")
-        # from inspire_sdkpy import inspire_dds  # lazy import
-        # import inspire_sdkpy.inspire_hand_defaut as inspire_hand_default
+        from inspire_sdkpy import inspire_dds  # lazy import
+        import inspire_sdkpy.inspire_hand_defaut as inspire_hand_default
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.simulation_mode = simulation_mode
@@ -209,7 +212,7 @@ class Inspire_Controller_FTP:
         logger_mp.info("[Inspire_Controller_FTP] Initial hand states received or timeout.")
 
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array, self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
+                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, xr_motion_data_ready_in))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -264,7 +267,7 @@ class Inspire_Controller_FTP:
 
 
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
+                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, xr_motion_data_ready_in = None):
         logger_mp.info("[Inspire_Controller_FTP] Control process started.")
         self.running = True
 
@@ -279,11 +282,16 @@ class Inspire_Controller_FTP:
                     left_hand_data  = np.array(left_hand_array[:]).reshape(25, 3).copy()
                 with right_hand_array.get_lock():
                     right_hand_data = np.array(right_hand_array[:]).reshape(25, 3).copy()
+                if xr_motion_data_ready_in is not None:
+                    with xr_motion_data_ready_in.get_lock():
+                        xr_motion_data_ready = xr_motion_data_ready_in.value
+                else:
+                    xr_motion_data_ready = True
 
                 # Read left and right q_state from shared arrays
                 state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
 
-                if not np.all(right_hand_data == 0.0) and not np.all(left_hand_data[4] == np.array([-1.13, 0.3, 0.15])): # if hand data has been initialized.
+                if xr_motion_data_ready:
                     ref_left_value = left_hand_data[self.hand_retargeting.left_indices[1,:]] - left_hand_data[self.hand_retargeting.left_indices[0,:]]
                     ref_right_value = right_hand_data[self.hand_retargeting.right_indices[1,:]] - right_hand_data[self.hand_retargeting.right_indices[0,:]]
 
