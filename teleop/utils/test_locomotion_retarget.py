@@ -15,6 +15,7 @@ if parent_dir not in sys.path:
 from teleop.utils.locomotion_retarget import (  # noqa: E402
     HeadLocomotionRetargeter, LocoTuning, Twist, ZERO_TWIST,
     head_axes, head_ypr, neck_pivot, shaped_axis, wrap_to_pi,
+    LatchingToggle, deadman_is_available, joystick_twist,
 )
 
 # The real basis-change constants from televuer/tv_wrapper.py:105-113. Reproduced here so the
@@ -383,6 +384,92 @@ def test_speeds_never_exceed_configured_limits():
     assert twist.vx <= tuning.max_vx + 1e-9, twist
     assert abs(twist.vy) <= tuning.max_vy + 1e-9
     assert abs(twist.wz) <= tuning.max_wz + 1e-9
+
+
+# ---------------------------------------------------------------------------------------
+# controller gate: latching toggle, thumbstick retargeting, deadman availability
+# ---------------------------------------------------------------------------------------
+
+class _Ctrl:
+    """Minimal stand-in for TeleData's controller fields."""
+
+    def __init__(self, **kw):
+        self.left_ctrl_aButton = False
+        self.left_ctrl_bButton = False
+        self.right_ctrl_aButton = False
+        self.right_ctrl_bButton = False
+        self.left_ctrl_thumbstickValue = np.zeros(2)
+        self.right_ctrl_thumbstickValue = np.zeros(2)
+        self.left_ctrl_squeeze = False
+        self.right_ctrl_squeeze = False
+        self.left_ctrl_triggerValue = 10.0
+        self.right_ctrl_triggerValue = 10.0
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_toggle_starts_disarmed_and_flips_on_rising_edge_only():
+    t = LatchingToggle("x")
+    assert t.state is False, "walking must never be armed at startup"
+    held = _Ctrl(left_ctrl_aButton=True)
+    assert t.update(held) is True
+    # Still held across many frames -- must not oscillate at loop rate.
+    for _ in range(50):
+        assert t.update(held) is True
+    released = _Ctrl(left_ctrl_aButton=False)
+    assert t.update(released) is True, "releasing must not disarm"
+    assert t.update(held) is False, "second press disarms"
+
+
+def test_toggle_rejects_the_quit_button():
+    # right_ctrl_aButton quits teleoperation; offering it as a gate would be a footgun.
+    for bad in ("a", "A", "start", ""):
+        try:
+            LatchingToggle(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} should not be a valid toggle button")
+
+
+def test_centred_sticks_return_none_not_zero():
+    # None is what lets the caller distinguish "stick idle" from "stick commanding a stop".
+    tuning = LocoTuning()
+    assert joystick_twist(_Ctrl(), tuning) is None
+    nudge = _Ctrl(left_ctrl_thumbstickValue=np.array([0.02, -0.03]))
+    assert joystick_twist(nudge, tuning, deadzone=0.08) is None
+
+
+def test_stick_axes_and_limits():
+    tuning = LocoTuning()
+    # Left stick pushed forward is -y in the XR convention -> +vx.
+    fwd = joystick_twist(_Ctrl(left_ctrl_thumbstickValue=np.array([0.0, -1.0])), tuning)
+    assert fwd.vx > 0 and abs(fwd.vy) < 1e-9, fwd
+    # Left stick pushed left -> +vy.
+    left = joystick_twist(_Ctrl(left_ctrl_thumbstickValue=np.array([-1.0, 0.0])), tuning)
+    assert left.vy > 0 and abs(left.vx) < 1e-9, left
+    # Right stick pushed left -> +wz (turn left / CCW).
+    turn = joystick_twist(_Ctrl(right_ctrl_thumbstickValue=np.array([-1.0, 0.0])), tuning)
+    assert turn.wz > 0 and abs(turn.vx) < 1e-9, turn
+    # Full deflection on every axis stays inside the configured ceilings.
+    full = joystick_twist(_Ctrl(left_ctrl_thumbstickValue=np.array([-1.0, -1.0]),
+                                right_ctrl_thumbstickValue=np.array([-1.0, 0.0])), tuning)
+    assert full.vx <= tuning.max_vx + 1e-9
+    assert full.vy <= tuning.max_vy + 1e-9
+    assert full.wz <= tuning.max_wz + 1e-9
+
+
+def test_deadman_availability_matches_eval_deadman():
+    # Guards the startup check against drifting away from the runtime implementation.
+    for mode, ok, bad in (
+        ("hand", ["left_fist", "right_fist", "both_fist", "left_pinch", "right_pinch", "none"],
+                 ["left_trigger", "right_trigger"]),
+        ("controller", ["left_fist", "right_fist", "both_fist", "left_trigger", "right_trigger", "none"],
+                       ["left_pinch", "right_pinch"]),
+    ):
+        for kind in ok:
+            assert deadman_is_available(kind, mode), f"{kind} should be valid in {mode}"
+        for kind in bad:
+            assert not deadman_is_available(kind, mode), f"{kind} should be invalid in {mode}"
 
 
 def _run_all():

@@ -20,7 +20,8 @@ from teleimager.image_client import ImageClient
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
-from teleop.utils.locomotion_retarget import HeadLocomotionRetargeter, LocoTuning, eval_deadman
+from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
+                                              deadman_is_available, joystick_twist, LatchingToggle)
 from teleop.utils.locomotion_publisher import LocomotionCommandPublisher, parse_sign
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -104,7 +105,19 @@ if __name__ == '__main__':
     parser.add_argument('--loco-yaw-source', type=str, choices=['roll', 'off'], default='roll', help='How to steer: head roll (tilt) or no turning at all')
     parser.add_argument('--loco-deadman', type=str, default='left_fist',
                         choices=['left_fist', 'right_fist', 'both_fist', 'left_pinch', 'right_pinch', 'left_trigger', 'right_trigger', 'none'],
-                        help='Hold-to-walk gesture. Releasing it stops the robot immediately.')
+                        help='Hold-to-walk gesture, used by --loco-gate=hold. Releasing it stops the robot immediately.')
+    parser.add_argument('--loco-gate', type=str, choices=['auto', 'hold', 'toggle'], default='auto',
+                        help='How head-driven walking is armed. "hold" = hold --loco-deadman the whole '
+                             'time. "toggle" = latch on/off with --loco-toggle-button. "auto" (default) '
+                             'picks hold for --input-mode hand and toggle for controller, where the '
+                             'thumbsticks are the primary way to drive and every hold gesture collides '
+                             'with end-effector control.')
+    parser.add_argument('--loco-toggle-button', type=str, choices=['x', 'y', 'b'], default='x',
+                        help='Face button that latches head-driven walking when --loco-gate=toggle. '
+                             '"A" is not offered: it quits teleoperation.')
+    parser.add_argument('--loco-stick-deadzone', type=float, default=0.08,
+                        help='Thumbstick deflection below which the stick is treated as centred. '
+                             'Beyond it the stick overrides head-driven walking.')
     parser.add_argument('--loco-max-vx', type=float, default=0.40, help='Max forward/back speed (m/s)')
     parser.add_argument('--loco-max-vy', type=float, default=0.25, help='Max lateral speed (m/s)')
     parser.add_argument('--loco-max-wz', type=float, default=0.60, help='Max yaw rate (rad/s)')
@@ -144,6 +157,20 @@ if __name__ == '__main__':
                 logger_mp.warning("--head-loco on hardware: forcing --motion so arms use "
                                   "rt/arm_sdk and the balance controller stays up.")
             args.motion = True
+        # Resolve the gate. Controllers default to a latching toggle: the thumbsticks are the
+        # natural way to drive, and every hold-to-walk gesture doubles as an end-effector
+        # input (with --ee brainco, squeeze drives the index finger and the trigger drives
+        # the other four), so holding one to walk would clench the hand.
+        if args.loco_gate == 'auto':
+            args.loco_gate = 'hold' if args.input_mode == 'hand' else 'toggle'
+        # eval_deadman() runs inside the control loop, so validate here instead of letting an
+        # illegal pairing raise on the first iteration with the robot already live.
+        if args.loco_gate == 'hold' and not deadman_is_available(args.loco_deadman, args.input_mode):
+            parser.error(
+                f"--loco-deadman={args.loco_deadman} is not available in "
+                f"--input-mode {args.input_mode}. Hand mode offers left/right/both_fist and "
+                f"left/right_pinch; controller mode offers left/right/both_fist and "
+                f"left/right_trigger.")
         try:
             loco_sign = parse_sign(args.loco_sign)
         except ValueError as e:
@@ -345,15 +372,16 @@ if __name__ == '__main__':
         # head/body-driven locomotion. Constructed after ChannelFactoryInitialize so the
         # publisher binds the right DDS domain (1 in sim).
         if args.head_loco:
-            loco_retarget = HeadLocomotionRetargeter(
-                LocoTuning(max_vx=args.loco_max_vx,
-                           max_vy=args.loco_max_vy,
-                           max_wz=args.loco_max_wz,
-                           walk_deadzone_ms=args.loco_walk_deadzone,
-                           walk_full_ms=args.loco_walk_full,
-                           neck_offset_m=args.loco_neck_offset,
-                           height=args.loco_height),
-                yaw_mode=args.loco_yaw_source)
+            loco_tuning = LocoTuning(max_vx=args.loco_max_vx,
+                                     max_vy=args.loco_max_vy,
+                                     max_wz=args.loco_max_wz,
+                                     walk_deadzone_ms=args.loco_walk_deadzone,
+                                     walk_full_ms=args.loco_walk_full,
+                                     neck_offset_m=args.loco_neck_offset,
+                                     height=args.loco_height)
+            loco_retarget = HeadLocomotionRetargeter(loco_tuning, yaw_mode=args.loco_yaw_source)
+            # Latched off at startup: arming walking must always be a deliberate press.
+            loco_toggle = LatchingToggle(args.loco_toggle_button) if args.loco_gate == 'toggle' else None
             loco_pub = LocomotionCommandPublisher(sim=args.sim,
                                                   loco_wrapper=loco_wrapper,
                                                   rate_hz=args.loco_rate,
@@ -385,11 +413,18 @@ if __name__ == '__main__':
             logger_mp.info(f"    arm topic     : {arm_topic}")
             logger_mp.info(f"    locomotion    : {loco_pub.transport_description}")
             logger_mp.info(f"    wire sign     : {loco_sign}  (vx,vy,wz)")
-            logger_mp.info(f"    deadman       : hold [{args.loco_deadman}] to walk, release to STOP")
+            if loco_toggle is not None:
+                logger_mp.info(f"    walk gate     : press [{loco_toggle.label}] to ARM/DISARM "
+                               f"head-driven walking (starts DISARMED)")
+            else:
+                logger_mp.info(f"    walk gate     : hold [{args.loco_deadman}] to walk, release to STOP")
             logger_mp.info(f"    steering      : {args.loco_yaw_source}"
                            f"{'  (tilt head left/right)' if args.loco_yaw_source == 'roll' else ''}")
             logger_mp.info(f"    limits        : vx<={args.loco_max_vx} vy<={args.loco_max_vy} "
                            f"wz<={args.loco_max_wz}")
+            if args.input_mode == "controller":
+                logger_mp.info("    thumbsticks   : ALWAYS live, and override head-driven walking "
+                               "while deflected")
             logger_mp.info("    walk to walk, stand still to stop (speed-matched);")
             logger_mp.info("    to cover more ground: release, walk back, re-engage.")
             logger_mp.info("⚠️  YOU ARE BLIND TO YOUR REAL SURROUNDINGS WHILE WALKING.")
@@ -450,15 +485,43 @@ if __name__ == '__main__':
             # arrives and before IK, so solver latency never delays the setpoint. The
             # publisher thread re-sends it at its own rate.
             if args.head_loco:
-                walk_enable = eval_deadman(tele_data, args.loco_deadman, args.input_mode)
-                twist = loco_retarget.update(tele_data.head_pose, walk_enable, time.monotonic())
+                # Arm the head-driven source: a held gesture in hand mode, a latched button in
+                # controller mode. The toggle is sampled every frame so its rising edge is
+                # never missed.
+                if loco_toggle is not None:
+                    was_armed = loco_toggle.state
+                    walk_enable = loco_toggle.update(tele_data)
+                    if walk_enable != was_armed:
+                        logger_mp.info(f"[loco] head-driven walking "
+                                       f"{'ARMED' if walk_enable else 'DISARMED'} "
+                                       f"([{loco_toggle.label}])")
+                else:
+                    walk_enable = eval_deadman(tele_data, args.loco_deadman, args.input_mode)
+
+                # The head retargeter is updated every frame regardless of who wins below, so
+                # its speed estimate and engagement heading stay continuous -- otherwise
+                # releasing the stick would hand over a stale setpoint.
+                head_twist = loco_retarget.update(tele_data.head_pose, walk_enable, time.monotonic())
+
+                # Arbitration: a deflected thumbstick is an explicit command and outranks the
+                # head. Centred sticks return None, which is what separates "stick idle" from
+                # "stick commanding a stop".
+                stick_twist = (joystick_twist(tele_data, loco_tuning, args.loco_stick_deadzone)
+                               if args.input_mode == "controller" else None)
+                if stick_twist is not None:
+                    twist, twist_src = stick_twist, "stick"
+                else:
+                    twist, twist_src = head_twist, "head"
                 loco_pub.set_twist(twist)
+
                 if args.loco_debug:
                     loco_dbg_i += 1
                     if loco_dbg_i % max(1, int(args.frequency // 2)) == 0:   # ~2 Hz
                         st = loco_retarget.status
+                        gate = ('ARMED' if walk_enable else 'disarmed') if loco_toggle is not None \
+                               else ('HELD' if walk_enable else 'open')
                         logger_mp.info(
-                            f"[loco] deadman={'HELD' if walk_enable else 'open'} "
+                            f"[loco] src={twist_src} gate={gate} "
                             f"fwd={st['fwd_ms']:+.2f}m/s lat={st['lat_ms']:+.2f}m/s "
                             f"roll={st['roll_rad']:+.2f}rad -> "
                             f"vx={twist.vx:+.3f} vy={twist.vy:+.3f} wz={twist.wz:+.3f} "
@@ -495,11 +558,23 @@ if __name__ == '__main__':
             
             # high level control
             if args.head_loco:
-                # Head-loco owns the twist (published above), so the thumbstick path is
-                # skipped -- two sources must never fight over the same command.
-                if args.input_mode == "controller" and tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
+                # loco_pub is the single writer to the wire: the thumbsticks were already
+                # arbitrated against the head source above and published through it, so the
+                # direct loco_wrapper.Move() call below is deliberately skipped. That also
+                # makes stick-driven walking work in sim, where there is no LocoClient at all.
+                if args.input_mode == "controller":
+                    # quit teleoperate
+                    if tele_data.right_ctrl_aButton:
+                        START = False
+                        STOP = True
+                    # soft emergency stop. Zero the publisher first so the held setpoint cannot
+                    # be re-sent by the publisher thread a few ms after damping.
+                    if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
+                        loco_pub.zero()
+                        if loco_toggle is not None:
+                            loco_toggle.state = False
+                        if loco_wrapper is not None:
+                            loco_wrapper.Enter_Damp_Mode()
             elif args.input_mode == "controller" and args.motion:
                 # quit teleoperater
                 if tele_data.right_ctrl_aButton:

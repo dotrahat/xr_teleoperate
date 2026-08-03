@@ -167,6 +167,76 @@ def eval_deadman(tele_data, kind, input_mode):
     raise ValueError(f"deadman {kind!r} is not available in --input-mode {input_mode}")
 
 
+def deadman_is_available(kind, input_mode):
+    """True if `kind` is a legal deadman for `input_mode`.
+
+    eval_deadman() runs inside the control loop, so an illegal combination would otherwise
+    only raise after the robot is already live. Call this at startup instead.
+    """
+    if kind == "none":
+        return True
+    if input_mode == "hand":
+        return kind in ("left_fist", "right_fist", "both_fist", "left_pinch", "right_pinch")
+    return kind in ("left_trigger", "right_trigger", "left_fist", "right_fist", "both_fist")
+
+
+# Controller face buttons usable as a latching gate. 'A' is deliberately absent: the main
+# loop uses right_ctrl_aButton to quit teleoperation.
+TOGGLE_BUTTONS = {
+    "x": ("left_ctrl_aButton",  "X (left controller)"),
+    "y": ("left_ctrl_bButton",  "Y (left controller)"),
+    "b": ("right_ctrl_bButton", "B (right controller)"),
+}
+
+
+class LatchingToggle:
+    """Rising-edge latch over a boolean button.
+
+    The control loop samples at 30-100 Hz, so a level read would flip the state every frame
+    for as long as the button is held. Only the released->pressed transition counts.
+    """
+
+    def __init__(self, button_key, initial=False):
+        try:
+            self.field, self.label = TOGGLE_BUTTONS[button_key]
+        except KeyError:
+            raise ValueError(
+                f"unknown toggle button {button_key!r}, expected one of {sorted(TOGGLE_BUTTONS)}")
+        self.state = bool(initial)
+        self._prev = False
+
+    def update(self, tele_data):
+        """Sample the button; returns the (possibly flipped) state."""
+        pressed = bool(getattr(tele_data, self.field, False))
+        if pressed and not self._prev:
+            self.state = not self.state
+        self._prev = pressed
+        return self.state
+
+
+def joystick_twist(tele_data, tuning, deadzone=0.08):
+    """Thumbsticks -> Twist, or None when both sticks are inside the deadzone.
+
+    Axis mapping and the 0.3 scaling are inherited from upstream's controller path
+    (teleop_hand_and_arm.py), re-expressed against the configured limits so the joystick and
+    the head retargeter obey the same ceilings:
+        left stick  Y -> +vx (forward)      left stick X -> +vy (left)
+        right stick X -> +wz (turn left)
+    Returning None -- rather than a zero Twist -- lets the caller tell "stick centred" from
+    "stick commanding a stop", which is what makes joystick-overrides-head arbitration work.
+    """
+    lx, ly = float(tele_data.left_ctrl_thumbstickValue[0]), float(tele_data.left_ctrl_thumbstickValue[1])
+    rx = float(tele_data.right_ctrl_thumbstickValue[0])
+    if max(abs(lx), abs(ly), abs(rx)) < deadzone:
+        return None
+    return Twist(
+        vx=shaped_axis(-ly, deadzone, 1.0, tuning.max_vx),
+        vy=shaped_axis(-lx, deadzone, 1.0, tuning.max_vy),
+        wz=shaped_axis(-rx, deadzone, 1.0, tuning.max_wz),
+        height=tuning.height,
+    )
+
+
 class HeadLocomotionRetargeter:
     """Turns head pose + a hold-to-walk gate into a locomotion twist."""
 
