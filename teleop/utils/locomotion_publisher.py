@@ -20,7 +20,7 @@ import logging_mp
 from unitree_sdk2py.core.channel import ChannelPublisher
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
 
-logger_mp = logging_mp.get_logger(__name__)
+logger_mp = logging_mp.getLogger(__name__)
 
 RUN_COMMAND_TOPIC = "rt/run_command/cmd"
 

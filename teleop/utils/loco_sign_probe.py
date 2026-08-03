@@ -29,8 +29,8 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
 import logging_mp
-logging_mp.basic_config(level=logging_mp.INFO)
-logger_mp = logging_mp.get_logger(__name__)
+logging_mp.basicConfig(level=logging_mp.INFO)
+logger_mp = logging_mp.getLogger(__name__)
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
