@@ -22,7 +22,8 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
                                               deadman_is_available, joystick_twist, LatchingToggle)
-from teleop.utils.locomotion_publisher import LocomotionCommandPublisher, parse_sign
+from teleop.utils.locomotion_publisher import (LocomotionCommandPublisher, parse_sign,
+                                               VX_LIMITS, VY_LIMITS, WZ_LIMITS)
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -122,8 +123,18 @@ if __name__ == '__main__':
     parser.add_argument('--loco-max-vy', type=float, default=0.25, help='Max lateral speed (m/s)')
     parser.add_argument('--loco-max-wz', type=float, default=0.60, help='Max yaw rate (rad/s)')
     parser.add_argument('--loco-walk-deadzone', type=float, default=0.12, help='Operator walking speed ignored before the robot starts (m/s)')
-    parser.add_argument('--loco-walk-full', type=float, default=0.80, help='Operator walking speed giving full robot speed (m/s)')
+    parser.add_argument('--loco-walk-full', type=float, default=0.80,
+                        help='Operator walking speed that commands FULL robot speed (m/s). This is '
+                             'the gain knob: LOWER it to make the robot faster for the same walking '
+                             'speed (robot m/s per operator m/s = max_vx / (walk_full - deadzone)). '
+                             'Raising --loco-max-vx alone only raises the ceiling, not the gain.')
     parser.add_argument('--loco-neck-offset', type=float, default=0.10, help='Camera-to-neck-pivot distance (m)')
+    parser.add_argument('--loco-accel-xy', type=float, default=1.0,
+                        help='Translation ramp-up limit (m/s^2). Room-scale walking bursts are ~1-2 s, '
+                             'so at the default 1.0 the robot spends most of a burst still ramping and '
+                             'covers far less ground than you. Raise to ~2.5-3 to keep up. Deceleration '
+                             'is never ramped.')
+    parser.add_argument('--loco-accel-yaw', type=float, default=2.0, help='Yaw ramp-up limit (rad/s^2). Deceleration is never ramped.')
     parser.add_argument('--loco-rate', type=float, default=None, help='Publisher rate (Hz). Default 100 in sim, 30 on hardware.')
     parser.add_argument('--loco-sign', type=str, default='1,1,1', help='Wire sign per axis "vx,vy,wz". Measured on G129 Inspire wholebody; re-verify per policy with loco_sign_probe.py.')
     parser.add_argument('--loco-height', type=float, default=0.8, help='Base height command (4th element; G123 ignores it)')
@@ -386,6 +397,8 @@ if __name__ == '__main__':
                                                   loco_wrapper=loco_wrapper,
                                                   rate_hz=args.loco_rate,
                                                   sign=loco_sign,
+                                                  accel_xy=args.loco_accel_xy,
+                                                  accel_yaw=args.loco_accel_yaw,
                                                   height=args.loco_height)
 
         # record + headless / non-headless mode
@@ -422,6 +435,30 @@ if __name__ == '__main__':
                            f"{'  (tilt head left/right)' if args.loco_yaw_source == 'roll' else ''}")
             logger_mp.info(f"    limits        : vx<={args.loco_max_vx} vy<={args.loco_max_vy} "
                            f"wz<={args.loco_max_wz}")
+            # The speed-match gain is not any single flag -- it is max / (walk_full - deadzone),
+            # so raising --loco-max-vx alone silently changes nothing below walk_full. Print the
+            # gain and a worked example so a too-slow run is diagnosable from the banner.
+            span = max(args.loco_walk_full - args.loco_walk_deadzone, 1e-6)
+            gain_x, gain_y = args.loco_max_vx / span, args.loco_max_vy / span
+            probe = 0.5   # a relaxed indoor walking pace
+            logger_mp.info(f"    speed match   : gain {gain_x:.2f}x fwd / {gain_y:.2f}x lat above a "
+                           f"{args.loco_walk_deadzone} m/s deadzone")
+            logger_mp.info(f"                    you at {probe} m/s -> robot "
+                           f"{min(max(probe - args.loco_walk_deadzone, 0.0) * gain_x, args.loco_max_vx):.2f} m/s "
+                           f"(lower --loco-walk-full to go faster)")
+            logger_mp.info(f"    accel         : {args.loco_accel_xy} m/s^2 xy, {args.loco_accel_yaw} rad/s^2 yaw "
+                           f"({args.loco_max_vx / max(args.loco_accel_xy, 1e-6):.1f}s to reach max vx)")
+            # Trained-envelope clamps in the publisher are applied last, so a CLI max above them
+            # is silently truncated on the wire.
+            for name, value, (lo, hi) in (("vx", args.loco_max_vx, VX_LIMITS),
+                                          ("vy", args.loco_max_vy, VY_LIMITS),
+                                          ("wz", args.loco_max_wz, WZ_LIMITS)):
+                if value > hi:
+                    logger_mp.warning(f"    ⚠️  --loco-max-{name}={value} exceeds the wire clamp "
+                                      f"{hi}; forward/left commands are truncated to {hi}")
+                if -value < lo:
+                    logger_mp.warning(f"    ⚠️  --loco-max-{name}={value} exceeds the wire clamp "
+                                      f"{lo}; backward/right commands are truncated to {lo}")
             if args.input_mode == "controller":
                 logger_mp.info("    thumbsticks   : ALWAYS live, and override head-driven walking "
                                "while deflected")
