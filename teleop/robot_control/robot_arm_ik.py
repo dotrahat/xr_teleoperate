@@ -311,6 +311,7 @@ class G1_29_ArmIK:
         
 class G1_23_ArmIK:
     def __init__(self, Unit_Test = False, Visualization = False):
+        self.last_solve_ok = True  # updated by solve_ik(); False on IPOPT non-convergence
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
 
         self.Unit_Test = Unit_Test
@@ -573,6 +574,7 @@ class G1_23_ArmIK:
         try:
             sol = self.opti.solve()
             # sol = self.opti.solve_limited()
+            self.last_solve_ok = True
 
             sol_q = self.opti.value(self.var_q)
             self.smooth_filter.add_data(sol_q)
@@ -594,6 +596,7 @@ class G1_23_ArmIK:
         
         except Exception as e:
             logger_mp.error(f"ERROR in convergence, plotting debug info.{e}")
+            self.last_solve_ok = False
 
             sol_q = self.opti.debug.value(self.var_q)
             self.smooth_filter.add_data(sol_q)

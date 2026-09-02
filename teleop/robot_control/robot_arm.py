@@ -356,13 +356,18 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class G1_23_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = False):
+    def __init__(self, motion_mode = False, simulation_mode = False, log_pose_error = False):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
+        # Opt-in capture of the post-clip command for --log-pose-error. Off by default, so the
+        # publish loop below does no extra work (and takes no extra lock) on a normal run.
+        self.log_pose_error = log_pose_error
 
         logger_mp.info("Initialize G1_23_ArmController...")
         self.q_target = np.zeros(10)
         self.tauff_target = np.zeros(10)
+        if self.log_pose_error:
+            self.cliped_q_target_last = np.zeros(10)  # last commanded q after the velocity clip
 
         self.kp_high = 300.0
         self.kd_high = 3.0
@@ -470,6 +475,12 @@ class G1_23_ArmController:
                 cliped_arm_q_target = arm_q_target
             else:
                 cliped_arm_q_target = self.clip_arm_q_target(arm_q_target, velocity_limit = self.arm_velocity_limit)
+            if self.log_pose_error:
+                # Copy: in simulation_mode the clip is skipped and cliped_arm_q_target *is* the
+                # self.q_target object, so storing the reference would tie this snapshot to a
+                # value ctrl_dual_arm() owns.
+                with self.ctrl_lock:
+                    self.cliped_q_target_last = np.asarray(cliped_arm_q_target, dtype=float).copy()
 
             for idx, id in enumerate(G1_23_JointArmIndex):
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
@@ -507,6 +518,16 @@ class G1_23_ArmController:
     def get_current_dual_arm_q(self):
         '''Return current state q of the left and right arm motors.'''
         return np.array([self.lowstate_buffer.GetData().motor_state[id].q for id in G1_23_JointArmIndex])
+
+    def get_last_clipped_q_target(self):
+        '''Return the most recent q_target actually written to the wire, after the velocity clip
+        (identical to the unclipped target in simulation mode). For pose-error logging; requires
+        log_pose_error=True at construction.'''
+        if not self.log_pose_error:
+            raise RuntimeError("get_last_clipped_q_target() requires G1_23_ArmController("
+                               "log_pose_error=True); nothing is being captured.")
+        with self.ctrl_lock:
+            return self.cliped_q_target_last.copy()
     
     def get_current_dual_arm_dq(self):
         '''Return current state dq of the left and right arm motors.'''

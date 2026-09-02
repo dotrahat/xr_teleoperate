@@ -21,5 +21,6 @@ __MACOSX/
 !video_cover2.jpg
 teleop/data/
 episode_0*
+pose_logs/
 .vscode/
 *.pkl

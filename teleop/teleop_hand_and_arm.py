@@ -17,7 +17,9 @@ from televuer import TeleVuerWrapper
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController, R1_A5_ArmController, R1_A7_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK, R1_A5_ArmIK, R1_A7_ArmIK
 from teleimager.image_client import ImageClient
+from datetime import datetime
 from teleop.utils.episode_writer import EpisodeWriter
+from teleop.utils.pose_error_logger import PoseErrorLogger
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
@@ -146,6 +148,13 @@ if __name__ == '__main__':
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
+    # pose-error logging: desired (human) vs achievable (IK) vs commanded (post velocity-clip) vs
+    # actual (measured) wrist pose, per tick, for offline analysis. Independent of --record.
+    parser.add_argument('--log-pose-error', action = 'store_true',
+                        help = 'Log per-tick wrist pose error (desired/IK/commanded/actual) to CSV for offline analysis. G1_23 only.')
+    # Deliberately outside --task-dir: analysis output never lands in the episode data tree.
+    parser.add_argument('--pose-log-dir', type = str, default = './utils/pose_logs/',
+                        help = 'Directory for --log-pose-error runs (a timestamped subdirectory is created per run).')
 
     args = parser.parse_args()
 
@@ -210,6 +219,17 @@ if __name__ == '__main__':
     # force args.motion True on hardware -- ordering it earlier would let that slip through.
     if args.arm in ("R1_A5", "R1_A7") and args.motion:
         parser.error(f"{args.arm} does not support motion mode (--motion).")
+
+    # Pose-error logging is wired for G1_23 only: it needs the post-clip command readback
+    # (G1_23_ArmController.get_last_clipped_q_target) and the IK convergence flag
+    # (G1_23_ArmIK.last_solve_ok), which no other variant provides. Refuse to start rather than
+    # fall back and write a CSV whose 'cmd' columns silently duplicate 'ik' and whose ik_ok is a
+    # constant -- a log that looks valid and isn't is worse than no log.
+    if args.log_pose_error and args.arm != "G1_23":
+        parser.error(
+            f"--log-pose-error is only supported on --arm=G1_23 (got {args.arm}). The other arm "
+            "variants expose neither the post-velocity-clip command readback nor the IK "
+            "convergence flag, so the commanded and ik_ok columns would be fabricated.")
 
     logger_mp.debug(f"args: {args}")
 
@@ -276,7 +296,8 @@ if __name__ == '__main__':
             arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
         elif args.arm == "G1_23":
             arm_ik = G1_23_ArmIK()
-            arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+            arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim,
+                                           log_pose_error=args.log_pose_error)
         elif args.arm == "H1_2":
             arm_ik = H1_2_ArmIK()
             arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
@@ -410,6 +431,27 @@ if __name__ == '__main__':
                                      frequency = args.frequency, 
                                      rerun_log = not args.headless)
 
+        # pose-error logging (independent of --record)
+        if args.log_pose_error:
+            pose_log_run_dir = os.path.join(
+                args.pose_log_dir,
+                f"{'sim' if args.sim else 'real'}_{args.arm}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            pose_logger = PoseErrorLogger(
+                arm_ik=arm_ik,
+                out_dir=pose_log_run_dir,
+                run_meta={
+                    "arm": args.arm,
+                    "ee": args.ee,
+                    "sim": args.sim,
+                    "motion": args.motion,
+                    "debug_mode": args.debug_mode,
+                    "arm_reference_mode": args.arm_reference_mode,
+                    "frequency": args.frequency,
+                    "input_mode": args.input_mode,
+                },
+            )
+
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
         if args.record:
@@ -476,6 +518,9 @@ if __name__ == '__main__':
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
+        if args.log_pose_error:
+            pose_log_start_time = time.time()
+            pose_log_seq = 0
         # Started only after [r], so nothing can move the robot before the operator is ready.
         if loco_pub is not None:
             loco_pub.start()
@@ -649,6 +694,24 @@ if __name__ == '__main__':
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+
+            # pose-error logging (independent of --record; see PoseErrorLogger)
+            if args.log_pose_error:
+                # G1_23 only (enforced at startup), so both readbacks are guaranteed present.
+                pose_logger.log(
+                    seq=pose_log_seq,
+                    t_rel=start_time - pose_log_start_time,
+                    desired_l=tele_data.left_wrist_pose,
+                    desired_r=tele_data.right_wrist_pose,
+                    sol_q=sol_q,
+                    clipped_q=arm_ctrl.get_last_clipped_q_target(),
+                    measured_q=current_lr_arm_q,
+                    ik_ms=(time_ik_end - time_ik_start) * 1000.0,
+                    ik_ok=arm_ik.last_solve_ok,
+                    episode_id=(recorder.episode_id if args.record else -1),
+                    record_state=('RECORDING' if RECORD_RUNNING else 'IDLE') if args.record else '',
+                )
+                pose_log_seq += 1
 
             # record data
             if args.record:
@@ -864,5 +927,11 @@ if __name__ == '__main__':
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
+
+        try:
+            if args.log_pose_error:
+                pose_logger.close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close pose_logger: {e}")
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)
