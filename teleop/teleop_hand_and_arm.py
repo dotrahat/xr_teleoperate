@@ -20,6 +20,8 @@ from teleimager.image_client import ImageClient
 from datetime import datetime
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.pose_error_logger import PoseErrorLogger
+from teleop.utils.head_relative_monitor import HeadRelativeMonitor
+from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
@@ -155,6 +157,17 @@ if __name__ == '__main__':
     # Deliberately outside --task-dir: analysis output never lands in the episode data tree.
     parser.add_argument('--pose-log-dir', type = str, default = './utils/pose_logs/',
                         help = 'Directory for --log-pose-error runs (a timestamped subdirectory is created per run).')
+    # Independent live comparison of unscaled human and measured robot head-relative wrists.
+    parser.add_argument('--head-relative-monitor', action='store_true',
+                        help='Log head-relative human/robot wrists to standalone CSV and show live Matplotlib graphs (G1_23 + BrainCo hand tracking only).')
+    parser.add_argument('--head-relative-monitor-dir', type=str, default='./utils/head_relative_logs/',
+                        help='Standalone output directory for --head-relative-monitor runs.')
+    parser.add_argument('--head-relative-monitor-window', type=float, default=20.0,
+                        help='Rolling Matplotlib time window in seconds.')
+    parser.add_argument('--head-relative-monitor-rate', type=float, default=10.0,
+                        help='Matplotlib redraw rate in Hz; CSV still receives every submitted control sample.')
+    parser.add_argument('--head-relative-monitor-no-viewer', action='store_true',
+                        help='Write standalone head-relative CSV without opening a Matplotlib window.')
 
     args = parser.parse_args()
 
@@ -231,12 +244,27 @@ if __name__ == '__main__':
             "variants expose neither the post-velocity-clip command readback nor the IK "
             "convergence flag, so the commanded and ik_ok columns would be fabricated.")
 
+    if args.head_relative_monitor:
+        if (args.arm, args.ee, args.input_mode) != ("G1_23", "brainco", "hand"):
+            parser.error(
+                "--head-relative-monitor requires --arm=G1_23 --ee=brainco --input-mode=hand; "
+                "those are the geometry and XR wrist semantics this comparison verifies.")
+        if args.arm_reference_mode != "head_yaw":
+            parser.error(
+                "--head-relative-monitor requires --arm-reference-mode=head_yaw so human and "
+                "robot relative XYZ use corresponding forward/left/up axes.")
+        if args.head_relative_monitor_window <= 0.0:
+            parser.error("--head-relative-monitor-window must be positive.")
+        if args.head_relative_monitor_rate <= 0.0:
+            parser.error("--head-relative-monitor-rate must be positive.")
+
     logger_mp.debug(f"args: {args}")
 
     # Defined before the try so the finally block can always reference them.
     loco_wrapper = None
     loco_retarget = None
     loco_pub = None
+    head_relative_monitor = None
 
     try:
         # setup dds communication domains id
@@ -422,6 +450,37 @@ if __name__ == '__main__':
                                                   accel_yaw=args.loco_accel_yaw,
                                                   height=args.loco_height)
 
+        # Standalone from EpisodeWriter: its own process, queue, CSV, metadata and GUI.
+        if args.head_relative_monitor:
+            monitor_run_dir = os.path.join(
+                args.head_relative_monitor_dir,
+                f"{'sim' if args.sim else 'real'}_G1_23_brainco_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            try:
+                head_relative_monitor = HeadRelativeMonitor(
+                    model=arm_ik.reduced_robot.model,
+                    left_frame_id=arm_ik.L_hand_id,
+                    right_frame_id=arm_ik.R_hand_id,
+                    out_dir=monitor_run_dir,
+                    metadata={
+                        "arm": args.arm,
+                        "ee": args.ee,
+                        "input_mode": args.input_mode,
+                        "arm_reference_mode": args.arm_reference_mode,
+                        "frequency_hz": args.frequency,
+                        "sim": args.sim,
+                        "brainco_wrist_offset_m": G1_23_BRAINCO_WRIST_OFFSET_M,
+                        "mapping": "unscaled_head_relative_xyz",
+                    },
+                    window_seconds=args.head_relative_monitor_window,
+                    plot_rate_hz=args.head_relative_monitor_rate,
+                    show_plot=not (args.headless or args.head_relative_monitor_no_viewer),
+                )
+            except Exception as exc:
+                logger_mp.error(
+                    f"Head-relative monitor failed to start ({exc}); teleoperation will continue."
+                )
+
         # record + headless / non-headless mode
         if args.record:
             recorder = EpisodeWriter(task_dir = os.path.join(args.task_dir, args.task_name),
@@ -521,6 +580,9 @@ if __name__ == '__main__':
         if args.log_pose_error:
             pose_log_start_time = time.time()
             pose_log_seq = 0
+        if head_relative_monitor is not None:
+            head_relative_monitor_start_time = time.monotonic()
+            head_relative_monitor_seq = 0
         # Started only after [r], so nothing can move the robot before the operator is ready.
         if loco_pub is not None:
             loco_pub.start()
@@ -694,6 +756,17 @@ if __name__ == '__main__':
             time_ik_end = time.time()
             logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+
+            if head_relative_monitor is not None:
+                head_relative_monitor.log(
+                    seq=head_relative_monitor_seq,
+                    t_rel=time.monotonic() - head_relative_monitor_start_time,
+                    desired_left=tele_data.left_wrist_pose,
+                    desired_right=tele_data.right_wrist_pose,
+                    measured_q=current_lr_arm_q,
+                    ik_ok=arm_ik.last_solve_ok,
+                )
+                head_relative_monitor_seq += 1
 
             # pose-error logging (independent of --record; see PoseErrorLogger)
             if args.log_pose_error:
@@ -922,6 +995,12 @@ if __name__ == '__main__':
         except Exception as e:
             logger_mp.error(f"Failed to stop sim state subscriber: {e}")
         
+        try:
+            if head_relative_monitor is not None:
+                head_relative_monitor.close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close head-relative monitor: {e}")
+
         try:
             if args.record:
                 recorder.close()
