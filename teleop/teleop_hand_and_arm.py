@@ -26,6 +26,12 @@ from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuni
                                               deadman_is_available, joystick_twist, LatchingToggle)
 from teleop.utils.locomotion_publisher import (LocomotionCommandPublisher, parse_sign,
                                                VX_LIMITS, VY_LIMITS, WZ_LIMITS)
+from teleop.utils.arm_retarget import (
+    DEFAULT_LEFT_HUMAN_SHOULDER_HEAD_M,
+    DEFAULT_RIGHT_HUMAN_SHOULDER_HEAD_M,
+    G1_23_BraincoArmRetargeter,
+    parse_xyz,
+)
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -90,6 +96,16 @@ if __name__ == '__main__':
                              'yaw, so the arms follow the direction you face. "head_position" is the '
                              'pre-v1.6 behaviour: translation relative to the head only, orientation '
                              'left in world frame.')
+    parser.add_argument('--g1-23-human-arm-length', type=float, default=0.48,
+                        help='Shoulder-to-wrist length in metres for G1_23 + BrainCo hand tracking.')
+    parser.add_argument('--g1-23-left-shoulder-anchor', type=str,
+                        default=','.join(str(v) for v in DEFAULT_LEFT_HUMAN_SHOULDER_HEAD_M),
+                        help='Experimental left human shoulder anchor x,y,z in the head-relative robot basis (metres).')
+    parser.add_argument('--g1-23-right-shoulder-anchor', type=str,
+                        default=','.join(str(v) for v in DEFAULT_RIGHT_HUMAN_SHOULDER_HEAD_M),
+                        help='Experimental right human shoulder anchor x,y,z in the head-relative robot basis (metres).')
+    parser.add_argument('--disable-g1-23-arm-scaling', action='store_true',
+                        help='Disable shoulder-relative arm scaling for G1_23 + BrainCo hand tracking (A/B testing).')
     # network parameters
     parser.add_argument('--img-server-ip', type=str, default='192.168.123.164', help='IP address of image server, used by teleimager and televuer')
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
@@ -230,6 +246,24 @@ if __name__ == '__main__':
             f"--log-pose-error is only supported on --arm=G1_23 (got {args.arm}). The other arm "
             "variants expose neither the post-velocity-clip command readback nor the IK "
             "convergence flag, so the commanded and ik_ok columns would be fabricated.")
+
+    arm_position_retargeter = None
+    if (args.arm == "G1_23" and args.ee == "brainco" and args.input_mode == "hand"
+            and not args.disable_g1_23_arm_scaling):
+        try:
+            arm_position_retargeter = G1_23_BraincoArmRetargeter(
+                human_arm_length_m=args.g1_23_human_arm_length,
+                left_human_shoulder_head_m=parse_xyz(args.g1_23_left_shoulder_anchor),
+                right_human_shoulder_head_m=parse_xyz(args.g1_23_right_shoulder_anchor),
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        logger_mp.info(
+            f"G1-23 BrainCo shoulder-relative arm scale: {arm_position_retargeter.scale:.9f} "
+            f"(human shoulder-to-wrist={args.g1_23_human_arm_length:.6f} m); "
+            f"head-relative anchors L={arm_position_retargeter.left_human_shoulder_head_m}, "
+            f"R={arm_position_retargeter.right_human_shoulder_head_m}"
+        )
 
     logger_mp.debug(f"args: {args}")
 
@@ -562,6 +596,13 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            if arm_position_retargeter is not None:
+                tele_data.left_wrist_pose, tele_data.right_wrist_pose = (
+                    arm_position_retargeter.retarget(
+                        tele_data.left_wrist_pose,
+                        tele_data.right_wrist_pose,
+                    )
+                )
 
             # head/body-driven locomotion. Updated here, immediately after the tele data
             # arrives and before IK, so solver latency never delays the setpoint. The

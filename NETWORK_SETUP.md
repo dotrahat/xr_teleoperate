@@ -167,6 +167,18 @@ python teleop_hand_and_arm.py \
   --motion
 ```
 
+For this G1-23 + BrainCo + hand-tracking combination, shoulder-relative arm scaling is
+enabled by default using the measured `0.48 m` human shoulder-to-wrist length. The initial
+head-relative shoulder anchors can be tuned without editing code:
+
+```bash
+--g1-23-left-shoulder-anchor=-0.1500072,0.10022,-0.15822 \
+--g1-23-right-shoulder-anchor=-0.1500072,-0.10021,-0.15822
+```
+
+Use `--disable-g1-23-arm-scaling` for an unscaled A/B comparison. These options do not alter
+the existing `0.15 m` forward and `0.45 m` vertical head-to-waist offsets.
+
 Then on the Quest browser:
 
 ```
