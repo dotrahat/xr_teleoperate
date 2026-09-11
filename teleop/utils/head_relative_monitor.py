@@ -193,6 +193,12 @@ def _open_plot(window_seconds, out_dir):
         mpl_config_dir = os.path.join(out_dir, ".matplotlib")
         os.makedirs(mpl_config_dir, exist_ok=True)
         os.environ.setdefault("MPLCONFIGDIR", mpl_config_dir)
+        import matplotlib
+        # OpenCV in the teleoperation process ships its own Qt plugins, which can
+        # make Matplotlib's automatic Qt backend abort while loading xcb.  Tk is
+        # part of the tv-2 environment and keeps this plotting process independent
+        # of OpenCV's GUI stack.
+        matplotlib.use("TkAgg", force=True)
         import matplotlib.pyplot as plt
         return _PlotWindow(plt, window_seconds)
     except Exception as exc:
@@ -200,7 +206,7 @@ def _open_plot(window_seconds, out_dir):
         return None
 
 
-def _monitor_worker(queue, model, left_frame_id, right_frame_id, out_dir, metadata,
+def _monitor_worker(queue, status_queue, model, left_frame_id, right_frame_id, out_dir, metadata,
                     window_seconds, plot_rate_hz, show_plot):
     """Child-process entry point: FK, CSV and GUI are all owned here."""
     import pinocchio as pin
@@ -226,6 +232,8 @@ def _monitor_worker(queue, model, left_frame_id, right_frame_id, out_dir, metada
     with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
         writer = csv.writer(csv_file)
         writer.writerow(_CSV_HEADER)
+        csv_file.flush()
+        status_queue.put(("ready", "matplotlib" if plot is not None else "csv_only"))
         while True:
             timeout = max(0.0, min(0.1, next_redraw - time.monotonic())) if plot else 0.1
             try:
@@ -266,6 +274,19 @@ def _monitor_worker(queue, model, left_frame_id, right_frame_id, out_dir, metada
     logger_mp.info(f"Head-relative monitor closed ({rows_written} rows) -> {csv_path}")
 
 
+def _monitor_worker_entry(*args):
+    """Report Python startup failures to the parent before exiting."""
+    status_queue = args[1]
+    try:
+        _monitor_worker(*args)
+    except BaseException as exc:
+        try:
+            status_queue.put(("error", repr(exc)))
+        except Exception:
+            pass
+        raise
+
+
 class HeadRelativeMonitor:
     """Non-blocking parent-side handle for the independent monitor process."""
 
@@ -287,14 +308,32 @@ class HeadRelativeMonitor:
         self._closed = False
         context = mp.get_context("spawn")
         self._queue = context.Queue(maxsize=queue_size)
+        self._status_queue = context.Queue(maxsize=2)
         self._process = context.Process(
-            target=_monitor_worker,
+            target=_monitor_worker_entry,
             name="head-relative-monitor",
-            args=(self._queue, model, left_frame_id, right_frame_id, out_dir, metadata,
+            args=(self._queue, self._status_queue, model, left_frame_id, right_frame_id, out_dir, metadata,
                   float(window_seconds), float(plot_rate_hz), bool(show_plot)),
         )
         self._process.start()
-        logger_mp.info(f"==> Head-relative monitor writing to {self.csv_path}")
+        try:
+            status, detail = self._status_queue.get(timeout=15.0)
+        except Empty as exc:
+            if self._process.is_alive():
+                self._process.terminate()
+            self._process.join(timeout=1.0)
+            self._close_queues()
+            raise RuntimeError("monitor process did not become ready within 15 seconds") from exc
+        if status != "ready":
+            self._process.join(timeout=1.0)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
+            self._close_queues()
+            raise RuntimeError(f"monitor process failed to start: {detail}")
+        logger_mp.info(
+            f"==> Head-relative monitor ready ({detail}), writing to {self.csv_path}"
+        )
 
     @property
     def dropped_samples(self):
@@ -362,8 +401,13 @@ class HeadRelativeMonitor:
                 logger_mp.warning("Head-relative monitor did not stop in time; terminating it.")
                 self._process.terminate()
                 self._process.join(timeout=1.0)
+        self._close_queues()
+        if self._dropped:
+            logger_mp.warning(f"Head-relative monitor dropped {self._dropped} samples due to backpressure.")
+
+    def _close_queues(self):
         # Never let a broken pipe or feeder thread hold up robot shutdown.
         self._queue.cancel_join_thread()
         self._queue.close()
-        if self._dropped:
-            logger_mp.warning(f"Head-relative monitor dropped {self._dropped} samples due to backpressure.")
+        self._status_queue.cancel_join_thread()
+        self._status_queue.close()

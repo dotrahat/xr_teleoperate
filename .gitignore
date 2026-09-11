@@ -22,5 +22,6 @@ __MACOSX/
 teleop/data/
 episode_0*
 pose_logs/
+head_relative_logs/
 .vscode/
 *.pkl
