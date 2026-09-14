@@ -21,7 +21,6 @@ from datetime import datetime
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.pose_error_logger import PoseErrorLogger
 from teleop.utils.head_relative_monitor import HeadRelativeMonitor
-from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
@@ -475,12 +474,13 @@ if __name__ == '__main__':
                         "arm_reference_mode": args.arm_reference_mode,
                         "frequency_hz": args.frequency,
                         "sim": args.sim,
-                        "brainco_wrist_offset_m": G1_23_BRAINCO_WRIST_OFFSET_M,
+                        "ik_endpoint_offset_m": 0.20,
                         "mapping": "unscaled_head_relative_xyz",
                         "comparison_role": "main_behavior_baseline",
                         "behavior_base_branch": "main",
                         "behavior_base_commit": MAIN_BASELINE_BEHAVIOR_COMMIT,
                         "instrumentation_only": True,
+                        "baseline_behavior_unchanged": True,
                         "head_origin_calibration": "legacy_virtual_head",
                     },
                     window_seconds=args.head_relative_monitor_window,

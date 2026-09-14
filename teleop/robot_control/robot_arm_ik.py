@@ -14,7 +14,6 @@ parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__
 sys.path.append(parent2_dir)
 
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
-from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
 
 class G1_29_ArmIK:
     def __init__(self, Unit_Test = False, Visualization = False):
@@ -319,9 +318,7 @@ class G1_23_ArmIK:
         self.Visualization = Visualization
 
         # fixed cache file path
-        # v2 replaces the old artificial 0.20 m palm point with the BrainCo
-        # wrist/base frame defined by the custom URDF.
-        self.cache_path = "g1_23_mode10_model_cache_v2.pkl"
+        self.cache_path = "g1_23_mode10_model_cache.pkl"
 
         if not self.Unit_Test:
             self.urdf_path = '../assets/g1/mode10/g1_23dof_mode_10_with_brainco.urdf'
@@ -390,7 +387,7 @@ class G1_23_ArmIK:
                 pin.Frame('L_ee',
                         self.reduced_robot.model.getJointId('left_wrist_roll_joint'),
                         pin.SE3(np.eye(3),
-                                np.array([G1_23_BRAINCO_WRIST_OFFSET_M,0,0]).T),
+                                np.array([0.20,0,0]).T),
                         pin.FrameType.OP_FRAME)
             )
             
@@ -398,7 +395,7 @@ class G1_23_ArmIK:
                 pin.Frame('R_ee',
                         self.reduced_robot.model.getJointId('right_wrist_roll_joint'),
                         pin.SE3(np.eye(3),
-                                np.array([G1_23_BRAINCO_WRIST_OFFSET_M,0,0]).T),
+                                np.array([0.20,0,0]).T),
                         pin.FrameType.OP_FRAME)
             )
 

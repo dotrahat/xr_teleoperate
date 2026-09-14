@@ -3,11 +3,8 @@
 import csv
 from pathlib import Path
 import tempfile
-import xml.etree.ElementTree as ET
-
 import numpy as np
 
-from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
 from teleop.utils.head_relative_monitor import (
     ROBOT_HEAD_IN_WAIST_M,
     HeadRelativeMonitor,
@@ -59,18 +56,6 @@ def test_csv_schema_and_row_stay_aligned():
     assert row[:4] == [7, 100.0, 1.5, 1]
 
 
-def test_brainco_wrist_offset_matches_custom_urdf():
-    repo_root = Path(__file__).resolve().parents[2]
-    urdf = ET.parse(
-        repo_root / "assets/g1/mode10/g1_23dof_mode_10_with_brainco.urdf"
-    ).getroot()
-    joints = {joint.attrib["name"]: joint for joint in urdf.findall("joint")}
-
-    for side in ("left", "right"):
-        xyz = np.fromstring(joints[f"{side}_base_joint"].find("origin").attrib["xyz"], sep=" ")
-        assert np.array_equal(xyz, [G1_23_BRAINCO_WRIST_OFFSET_M, 0.0, 0.0])
-
-
 def test_monitor_source_is_episode_and_rerun_independent():
     source = (Path(__file__).with_name("head_relative_monitor.py")).read_text(encoding="utf-8")
     assert "episode_writer" not in source.lower()
@@ -84,7 +69,16 @@ def test_main_baseline_provenance_is_logged():
     assert '"comparison_role": "main_behavior_baseline"' in source
     assert '"behavior_base_branch": "main"' in source
     assert '"instrumentation_only": True' in source
+    assert '"baseline_behavior_unchanged": True' in source
     assert '"head_origin_calibration": "legacy_virtual_head"' in source
+
+
+def test_main_ik_endpoint_is_unchanged():
+    source = (
+        Path(__file__).parents[1] / "robot_control" / "robot_arm_ik.py"
+    ).read_text(encoding="utf-8")
+    assert 'self.cache_path = "g1_23_mode10_model_cache.pkl"' in source
+    assert source.count("np.array([0.20,0,0]).T") >= 2
 
 
 def test_spawned_csv_monitor_uses_actual_fk_without_a_viewer():
