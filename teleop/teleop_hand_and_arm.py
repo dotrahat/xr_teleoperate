@@ -20,8 +20,14 @@ from teleimager.image_client import ImageClient
 from datetime import datetime
 from teleop.utils.episode_writer import EpisodeWriter
 from teleop.utils.pose_error_logger import PoseErrorLogger
-from teleop.utils.head_relative_monitor import HeadRelativeMonitor
-from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
+from teleop.utils.head_relative_monitor import (
+    G1_CALIBRATED_HEAD_IN_WAIST_M,
+    HeadRelativeMonitor,
+    head_relative_monitor_run_name,
+    retarget_wrist_pose_head_origin,
+    robot_head_in_waist,
+    validate_head_relative_monitor_config,
+)
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
@@ -159,7 +165,7 @@ if __name__ == '__main__':
                         help = 'Directory for --log-pose-error runs (a timestamped subdirectory is created per run).')
     # Independent live comparison of unscaled human and measured robot head-relative wrists.
     parser.add_argument('--head-relative-monitor', action='store_true',
-                        help='Log head-relative human/robot wrists to standalone CSV and show live Matplotlib graphs (G1_23 + BrainCo hand tracking only).')
+                        help='Log head-relative human/robot wrists to standalone CSV and show live Matplotlib graphs (G1_23 and G1_29 only; all supported end effectors, input modes, and arm reference modes).')
     parser.add_argument('--head-relative-monitor-dir', type=str, default='./utils/head_relative_logs/',
                         help='Standalone output directory for --head-relative-monitor runs.')
     parser.add_argument('--head-relative-monitor-window', type=float, default=20.0,
@@ -168,6 +174,8 @@ if __name__ == '__main__':
                         help='Matplotlib redraw rate in Hz; CSV still receives every submitted control sample.')
     parser.add_argument('--head-relative-monitor-no-viewer', action='store_true',
                         help='Write standalone head-relative CSV without opening a Matplotlib window.')
+    parser.add_argument('--g1-head-origin-calibration', action='store_true',
+                        help='Opt in to G1 URDF camera-midline head-to-waist calibration for arm targets. Legacy target geometry remains the default.')
 
     args = parser.parse_args()
 
@@ -233,30 +241,33 @@ if __name__ == '__main__':
     if args.arm in ("R1_A5", "R1_A7") and args.motion:
         parser.error(f"{args.arm} does not support motion mode (--motion).")
 
-    # Pose-error logging is wired for G1_23 only: it needs the post-clip command readback
-    # (G1_23_ArmController.get_last_clipped_q_target) and the IK convergence flag
-    # (G1_23_ArmIK.last_solve_ok), which no other variant provides. Refuse to start rather than
-    # fall back and write a CSV whose 'cmd' columns silently duplicate 'ik' and whose ik_ok is a
-    # constant -- a log that looks valid and isn't is worse than no log.
+    # Pose-error logging is wired for G1_23 only: it needs both the post-clip command readback
+    # (G1_23_ArmController.get_last_clipped_q_target) and the IK convergence flag. G1_29 now
+    # exposes convergence for the head-relative monitor, but still has no post-clip readback.
+    # Refuse to write a CSV whose 'cmd' columns would silently duplicate 'ik'.
     if args.log_pose_error and args.arm != "G1_23":
         parser.error(
             f"--log-pose-error is only supported on --arm=G1_23 (got {args.arm}). The other arm "
-            "variants expose neither the post-velocity-clip command readback nor the IK "
-            "convergence flag, so the commanded and ik_ok columns would be fabricated.")
+            "variants do not expose the required post-velocity-clip command readback, so the "
+            "commanded columns would be fabricated.")
+
+    try:
+        active_robot_head_in_waist = robot_head_in_waist(
+            args.arm, use_g1_calibration=args.g1_head_origin_calibration
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     if args.head_relative_monitor:
-        if (args.arm, args.ee, args.input_mode) != ("G1_23", "brainco", "hand"):
-            parser.error(
-                "--head-relative-monitor requires --arm=G1_23 --ee=brainco --input-mode=hand; "
-                "those are the geometry and XR wrist semantics this comparison verifies.")
-        if args.arm_reference_mode != "head_yaw":
-            parser.error(
-                "--head-relative-monitor requires --arm-reference-mode=head_yaw so human and "
-                "robot relative XYZ use corresponding forward/left/up axes.")
-        if args.head_relative_monitor_window <= 0.0:
-            parser.error("--head-relative-monitor-window must be positive.")
-        if args.head_relative_monitor_rate <= 0.0:
-            parser.error("--head-relative-monitor-rate must be positive.")
+        try:
+            validate_head_relative_monitor_config(
+                arm=args.arm,
+                arm_reference_mode=args.arm_reference_mode,
+                window_seconds=args.head_relative_monitor_window,
+                plot_rate_hz=args.head_relative_monitor_rate,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
 
     logger_mp.debug(f"args: {args}")
 
@@ -304,6 +315,11 @@ if __name__ == '__main__':
                                      arm_reference_mode=args.arm_reference_mode
                                      )
         logger_mp.info(f"🖐️  arm reference mode: {args.arm_reference_mode}")
+        if args.g1_head_origin_calibration:
+            logger_mp.info(
+                "🎯 G1 head-origin calibration enabled: "
+                f"{G1_CALIBRATED_HEAD_IN_WAIST_M.tolist()} m"
+            )
         
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -454,7 +470,14 @@ if __name__ == '__main__':
         if args.head_relative_monitor:
             monitor_run_dir = os.path.join(
                 args.head_relative_monitor_dir,
-                f"{'sim' if args.sim else 'real'}_G1_23_brainco_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                head_relative_monitor_run_name(
+                    sim=args.sim,
+                    arm=args.arm,
+                    ee=args.ee,
+                    input_mode=args.input_mode,
+                    arm_reference_mode=args.arm_reference_mode,
+                    timestamp=datetime.now().strftime('%Y%m%d_%H%M%S'),
+                ),
             )
             try:
                 head_relative_monitor = HeadRelativeMonitor(
@@ -469,12 +492,17 @@ if __name__ == '__main__':
                         "arm_reference_mode": args.arm_reference_mode,
                         "frequency_hz": args.frequency,
                         "sim": args.sim,
-                        "brainco_wrist_offset_m": G1_23_BRAINCO_WRIST_OFFSET_M,
                         "mapping": "unscaled_head_relative_xyz",
+                        "head_origin_calibration": (
+                            "g1_urdf_camera_midline"
+                            if args.g1_head_origin_calibration
+                            else "legacy_virtual_head"
+                        ),
                     },
                     window_seconds=args.head_relative_monitor_window,
                     plot_rate_hz=args.head_relative_monitor_rate,
                     show_plot=not (args.headless or args.head_relative_monitor_no_viewer),
+                    robot_head_in_waist=active_robot_head_in_waist,
                 )
             except Exception as exc:
                 logger_mp.error(
@@ -508,6 +536,12 @@ if __name__ == '__main__':
                     "arm_reference_mode": args.arm_reference_mode,
                     "frequency": args.frequency,
                     "input_mode": args.input_mode,
+                    "head_origin_calibration": (
+                        "g1_urdf_camera_midline"
+                        if args.g1_head_origin_calibration
+                        else "legacy_virtual_head"
+                    ),
+                    "robot_head_in_waist_m": active_robot_head_in_waist.tolist(),
                 },
             )
 
@@ -624,6 +658,13 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            if args.g1_head_origin_calibration:
+                tele_data.left_wrist_pose = retarget_wrist_pose_head_origin(
+                    tele_data.left_wrist_pose, active_robot_head_in_waist
+                )
+                tele_data.right_wrist_pose = retarget_wrist_pose_head_origin(
+                    tele_data.right_wrist_pose, active_robot_head_in_waist
+                )
 
             # head/body-driven locomotion. Updated here, immediately after the tele data
             # arrives and before IK, so solver latency never delays the setpoint. The

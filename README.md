@@ -226,6 +226,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
 |        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       | `G1_29` `G1_23` `H1_2` `H1` `H2` `R1_A5` `R1_A7` |      `G1_29`      |
 |        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
+| `--arm-reference-mode` | Choose whether arm targets follow head yaw or only head position | `head_yaw` `head_position` | `head_yaw` |
 |   `--img-server-ip`   | Set the image server IP address for receiving image streams and configuring WebRTC signaling |                        `IPv4` address                        | `192.168.123.164` |
 | `--network-interface` |    Set the network interface for CycloneDDS communication    |                    Network Interface Name                    |      `None`       |
 
@@ -239,11 +240,37 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |   `--ipc`    | **Inter-process communication mode** Allows controlling the xr_teleoperate program’s state via IPC. Suitable for interaction with agent programs. |
 | `--affinity` | **CPU affinity mode** Set CPU core affinity. If you are unsure what this is, do not set it. |
 |  `--record`  | **Enable data recording mode** Press **r** to start teleoperation, then **s** to start recording; press **s** again to stop and save the episode. Press **s** repeatedly to repeat the process. |
+| `--head-relative-monitor` | For `G1_23` and `G1_29`, opt in to standalone CSV logging and live Matplotlib plots comparing unscaled human and measured robot head-relative wrists. Supports every otherwise-valid end-effector/input combination and both arm reference modes. |
+| `--head-relative-monitor-dir` | Output directory for timestamped monitor runs. Default: `./utils/head_relative_logs/` |
+| `--head-relative-monitor-window` | Rolling live-plot window in seconds. Default: `20.0` |
+| `--head-relative-monitor-rate` | Live-plot redraw rate in Hz; CSV logging still receives every submitted control sample. Default: `10.0` |
+| `--head-relative-monitor-no-viewer` | Write `head_relative.csv` and `run_meta.json` without opening Matplotlib. `--headless` also disables the viewer. |
+| `--g1-head-origin-calibration` | Opt in to the G1 URDF camera-midline head origin for arm targets. This moves targets about 9.6 cm rearward and 2.4 cm upward relative to the legacy mapping; the legacy geometry remains the default. G1 only. |
 | `--task-dir` | Path to save recorded data. Default: `./utils/data/` |
 | `--task-name` | Task file name for recording. Default: `pick cube` |
 | `--task-goal` | Task goal recorded in the json file. Default: `pick up cube.` |
 | `--task-desc` | Task description recorded in the json file. Default: `task description` |
 | `--task-steps` | Task steps recorded in the json file. Default: `step1: do this; step2: do that;` |
+
+The head-relative monitor is independent of episode recording and remains off unless requested. For example, a headless G1 simulation run can write monitor data without opening a plot:
+
+```bash
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --arm=G1_29 --ee=dex3 --sim --head-relative-monitor --head-relative-monitor-no-viewer
+```
+
+The optional G1 head-origin calibration uses the robot camera height and sagittal midline rather than the legacy virtual head point. Session analysis showed that this reduces IK saturation for long forward and low reaches. Trial it with the robot supported and at low reach first; it changes physical arm targets and may reduce torso clearance. When the monitor or pose-error logger is enabled, its metadata records both the selected calibration and exact xyz origin:
+
+```bash
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --arm=G1_23 --ee=brainco --motion --g1-head-origin-calibration --head-relative-monitor
+```
+
+Analyze the newest monitor run and compare it with the previous compatible session:
+
+```bash
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python utils/analyze_head_relative_logs.py
+```
+
+The analyzer prints timing, integrity, per-arm error, workspace bands, lag, and target-matched comparison metrics. It also writes `analysis/analysis_summary.json` and `analysis/analysis.png` beside the analyzed run without modifying the source CSV. Pass a run directory or CSV path to analyze an older session, use `--baseline` for an explicit comparison, or use `--baseline none` for a standalone report. Run with `--help` for threshold and output options.
 
 ## 1.4 🔄 State Transition Diagram
 

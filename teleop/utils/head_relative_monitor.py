@@ -21,9 +21,15 @@ import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
 
-# The unchanged TeleVuer head-to-waist correction in tv_wrapper.py.  In the
-# fixed-pelvis IK frame this point is the virtual robot-head reference.
+# Legacy TeleVuer head-to-waist correction.  Keep it as the default so the
+# calibration can be trialled explicitly before changing established control
+# behaviour.
 ROBOT_HEAD_IN_WAIST_M = np.array([0.15, 0.0, 0.45], dtype=float)
+# G1 camera origin expressed in the fixed-pelvis IK frame at neutral waist.
+# The physical D435 is 17.53 mm left of centre; use the robot sagittal plane as
+# the head origin so left/right arm targets remain symmetric.
+G1_CALIBRATED_HEAD_IN_WAIST_M = np.array([0.05366, 0.0, 0.47387], dtype=float)
+SUPPORTED_G1_ARMS = frozenset(("G1_23", "G1_29"))
 
 _ARMS = ("left", "right")
 _AXES = ("x", "y", "z")
@@ -35,6 +41,69 @@ for _arm in _ARMS:
     _CSV_HEADER += [f"{_arm}_robot_distance"]
     _CSV_HEADER += [f"{_arm}_error_d{axis}" for axis in _AXES]
     _CSV_HEADER += [f"{_arm}_error_distance"]
+
+
+def validate_head_relative_monitor_config(arm, arm_reference_mode,
+                                          window_seconds, plot_rate_hz):
+    """Validate the CLI-facing configuration for the G1-only monitor."""
+    if arm not in SUPPORTED_G1_ARMS:
+        raise ValueError(
+            "--head-relative-monitor supports G1 teleoperation only "
+            f"(--arm=G1_23 or --arm=G1_29; got {arm})."
+        )
+    if arm_reference_mode not in ("head_yaw", "head_position"):
+        raise ValueError(
+            "--head-relative-monitor requires a supported arm reference mode "
+            f"(got {arm_reference_mode})."
+        )
+    if window_seconds <= 0.0:
+        raise ValueError("--head-relative-monitor-window must be positive.")
+    if plot_rate_hz <= 0.0:
+        raise ValueError("--head-relative-monitor-rate must be positive.")
+
+
+def robot_head_in_waist(arm, use_g1_calibration=False):
+    """Select the control/monitor head origin without changing legacy defaults."""
+    if use_g1_calibration and arm not in SUPPORTED_G1_ARMS:
+        raise ValueError(
+            "--g1-head-origin-calibration supports G1 teleoperation only "
+            f"(--arm=G1_23 or --arm=G1_29; got {arm})."
+        )
+    selected = (
+        G1_CALIBRATED_HEAD_IN_WAIST_M
+        if use_g1_calibration
+        else ROBOT_HEAD_IN_WAIST_M
+    )
+    return selected.copy()
+
+
+def retarget_wrist_pose_head_origin(
+        wrist_pose, target_head_in_waist,
+        source_head_in_waist=ROBOT_HEAD_IN_WAIST_M):
+    """Move a TeleVuer wrist target from one virtual head origin to another."""
+    pose = np.asarray(wrist_pose, dtype=float)
+    target = np.asarray(target_head_in_waist, dtype=float)
+    source = np.asarray(source_head_in_waist, dtype=float)
+    if pose.shape != (4, 4) or not np.all(np.isfinite(pose)):
+        raise ValueError("wrist_pose must be a finite 4x4 pose")
+    if target.shape != (3,) or source.shape != (3,):
+        raise ValueError("head origins must be xyz vectors")
+    if not np.all(np.isfinite(target)) or not np.all(np.isfinite(source)):
+        raise ValueError("head origins must be finite")
+    remapped = pose.copy()
+    remapped[:3, 3] += target - source
+    return remapped
+
+
+def head_relative_monitor_run_name(sim, arm, ee, input_mode,
+                                   arm_reference_mode, timestamp):
+    """Return a filesystem-safe run name from argparse-constrained values."""
+    target = "sim" if sim else "real"
+    end_effector = ee or "no_ee"
+    return (
+        f"{target}_{arm}_{end_effector}_{input_mode}_"
+        f"{arm_reference_mode}_{timestamp}"
+    )
 
 
 @dataclass(frozen=True)
@@ -207,7 +276,7 @@ def _open_plot(window_seconds, out_dir):
 
 
 def _monitor_worker(queue, status_queue, model, left_frame_id, right_frame_id, out_dir, metadata,
-                    window_seconds, plot_rate_hz, show_plot):
+                    robot_head_in_waist, window_seconds, plot_rate_hz, show_plot):
     """Child-process entry point: FK, CSV and GUI are all owned here."""
     import pinocchio as pin
 
@@ -216,7 +285,7 @@ def _monitor_worker(queue, status_queue, model, left_frame_id, right_frame_id, o
     meta_path = os.path.join(out_dir, "run_meta.json")
     run_meta = dict(metadata)
     run_meta.update({
-        "robot_head_in_waist_m": ROBOT_HEAD_IN_WAIST_M.tolist(),
+        "robot_head_in_waist_m": robot_head_in_waist.tolist(),
         "csv_columns": _CSV_HEADER,
         "started_at_unix": time.time(),
     })
@@ -250,8 +319,8 @@ def _monitor_worker(queue, status_queue, model, left_frame_id, right_frame_id, o
                     pin.framesForwardKinematics(model, fk_data, q)
                     robot_left = fk_data.oMf[left_frame_id].translation.copy()
                     robot_right = fk_data.oMf[right_frame_id].translation.copy()
-                    left = relative_measurement(human_left, robot_left)
-                    right = relative_measurement(human_right, robot_right)
+                    left = relative_measurement(human_left, robot_left, robot_head_in_waist)
+                    right = relative_measurement(human_right, robot_right, robot_head_in_waist)
                     writer.writerow(csv_row(seq, t_wall, t_rel, ik_ok, left, right))
                     rows_written += 1
                     if rows_written % 30 == 0:
@@ -292,13 +361,17 @@ class HeadRelativeMonitor:
 
     def __init__(self, model, left_frame_id, right_frame_id, out_dir, metadata,
                  window_seconds=20.0, plot_rate_hz=10.0, show_plot=True,
-                 queue_size=512):
+                 queue_size=512, robot_head_in_waist=ROBOT_HEAD_IN_WAIST_M):
         if window_seconds <= 0.0:
             raise ValueError("window_seconds must be positive")
         if plot_rate_hz <= 0.0:
             raise ValueError("plot_rate_hz must be positive")
         if queue_size < 2:
             raise ValueError("queue_size must be at least 2")
+        robot_head_in_waist = np.asarray(robot_head_in_waist, dtype=float)
+        if robot_head_in_waist.shape != (3,) or not np.all(np.isfinite(robot_head_in_waist)):
+            raise ValueError("robot_head_in_waist must be a finite xyz vector")
+        robot_head_in_waist = robot_head_in_waist.copy()
 
         self.out_dir = out_dir
         self.csv_path = os.path.join(out_dir, "head_relative.csv")
@@ -313,7 +386,7 @@ class HeadRelativeMonitor:
             target=_monitor_worker_entry,
             name="head-relative-monitor",
             args=(self._queue, self._status_queue, model, left_frame_id, right_frame_id, out_dir, metadata,
-                  float(window_seconds), float(plot_rate_hz), bool(show_plot)),
+                  robot_head_in_waist, float(window_seconds), float(plot_rate_hz), bool(show_plot)),
         )
         self._process.start()
         try:
