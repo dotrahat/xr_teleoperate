@@ -71,6 +71,8 @@ def test_main_baseline_provenance_is_logged():
     assert '"instrumentation_only": True' in source
     assert '"baseline_behavior_unchanged": True' in source
     assert '"head_origin_calibration": "legacy_virtual_head"' in source
+    assert "arm_ctrl = None" in source
+    assert "if arm_ctrl is not None:" in source
 
 
 def test_main_ik_endpoint_is_unchanged():

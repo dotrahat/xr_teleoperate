@@ -268,6 +268,7 @@ if __name__ == '__main__':
     loco_wrapper = None
     loco_retarget = None
     loco_pub = None
+    arm_ctrl = None
     head_relative_monitor = None
 
     try:
@@ -968,7 +969,8 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to stop locomotion publisher: {e}")
 
         try:
-            arm_ctrl.ctrl_dual_arm_go_home()
+            if arm_ctrl is not None:
+                arm_ctrl.ctrl_dual_arm_go_home()
         except Exception as e:
             logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
         

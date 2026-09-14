@@ -19,15 +19,22 @@ hardware, keep the robot supported and use motion mode:
 
 ```bash
 cd teleop
+conda activate tv-2
 python teleop_hand_and_arm.py \
   --arm=G1_23 \
   --ee=brainco \
   --input-mode=hand \
   --arm-reference-mode=head_yaw \
+  --network-interface=robot0 \
+  --display-mode=pass-through \
   --motion \
   --head-relative-monitor \
   --head-relative-monitor-no-viewer
 ```
+
+Run from the activated environment rather than through `conda run`; the
+keyboard listener requires an attached terminal. `robot0` is the hardware DDS
+interface used by the existing successful physical runs on this machine.
 
 The output is written below `teleop/utils/head_relative_logs/` in a directory
 whose name begins with `main_baseline_real_`. Copy or retain that entire run
