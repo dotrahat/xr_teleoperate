@@ -77,6 +77,16 @@ def test_monitor_source_is_episode_and_rerun_independent():
     assert "rerun" not in source.lower()
 
 
+def test_main_baseline_provenance_is_logged():
+    source = (Path(__file__).parents[1] / "teleop_hand_and_arm.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"comparison_role": "main_behavior_baseline"' in source
+    assert '"behavior_base_branch": "main"' in source
+    assert '"instrumentation_only": True' in source
+    assert '"head_origin_calibration": "legacy_virtual_head"' in source
+
+
 def test_spawned_csv_monitor_uses_actual_fk_without_a_viewer():
     import pinocchio as pin
 

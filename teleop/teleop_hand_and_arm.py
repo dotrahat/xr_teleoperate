@@ -30,6 +30,11 @@ from teleop.utils.locomotion_publisher import (LocomotionCommandPublisher, parse
                                                VX_LIMITS, VY_LIMITS, WZ_LIMITS)
 from sshkeyboard import listen_keyboard, stop_listening
 
+# This branch is main plus measurement-only instrumentation. Keep the main
+# behaviour revision explicit in every run so a comparison cannot accidentally
+# treat a later feature build as the control condition.
+MAIN_BASELINE_BEHAVIOR_COMMIT = "3c841ae39f53dae0b943c68012e6417ba3022a5b"
+
 # for simulation
 from unitree_sdk2py.core.channel import ChannelPublisher
 from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
@@ -454,7 +459,8 @@ if __name__ == '__main__':
         if args.head_relative_monitor:
             monitor_run_dir = os.path.join(
                 args.head_relative_monitor_dir,
-                f"{'sim' if args.sim else 'real'}_G1_23_brainco_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                f"main_baseline_{'sim' if args.sim else 'real'}_G1_23_brainco_"
+                f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             )
             try:
                 head_relative_monitor = HeadRelativeMonitor(
@@ -471,6 +477,11 @@ if __name__ == '__main__':
                         "sim": args.sim,
                         "brainco_wrist_offset_m": G1_23_BRAINCO_WRIST_OFFSET_M,
                         "mapping": "unscaled_head_relative_xyz",
+                        "comparison_role": "main_behavior_baseline",
+                        "behavior_base_branch": "main",
+                        "behavior_base_commit": MAIN_BASELINE_BEHAVIOR_COMMIT,
+                        "instrumentation_only": True,
+                        "head_origin_calibration": "legacy_virtual_head",
                     },
                     window_seconds=args.head_relative_monitor_window,
                     plot_rate_hz=args.head_relative_monitor_rate,
