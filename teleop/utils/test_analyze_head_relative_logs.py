@@ -63,7 +63,7 @@ def test_analyzer_schema_matches_monitor_schema():
 def test_latest_resolution_and_previous_compatible_discovery():
     with tempfile.TemporaryDirectory() as directory:
         older = _write_run(directory, "older", 0.05, 1000.0)
-        newer = _write_run(directory, "newer", 0.01, 2000.0, "g1_urdf_camera_midline")
+        newer = _write_run(directory, "newer", 0.01, 2000.0, "g1_cad_head_midline")
         older.touch()
         newer.touch()
         older_mtime = older.stat().st_mtime

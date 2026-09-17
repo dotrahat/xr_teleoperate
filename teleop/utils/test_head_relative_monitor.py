@@ -11,12 +11,16 @@ import numpy as np
 
 from teleop.utils.g1_23_geometry import G1_23_BRAINCO_WRIST_OFFSET_M
 from teleop.utils.head_relative_monitor import (
+    G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M,
+    G1_23_CALIBRATED_RIGHT_WRIST_RESIDUAL_M,
     G1_CALIBRATED_HEAD_IN_WAIST_M,
     ROBOT_HEAD_IN_WAIST_M,
     SUPPORTED_G1_ARMS,
     HeadRelativeMonitor,
     _CSV_HEADER,
+    apply_wrist_target_residual,
     csv_row,
+    g1_wrist_target_residuals,
     head_relative_monitor_run_name,
     relative_measurement,
     retarget_wrist_pose_head_origin,
@@ -91,26 +95,56 @@ def test_wrist_retarget_preserves_relative_vector_and_orientation():
     assert np.allclose(wrist[:3, 3], [0.45, -0.20, 0.20])
 
 
-def test_calibrated_head_origin_matches_neutral_g1_urdf_camera_midline():
-    repo_root = Path(__file__).resolve().parents[2]
-    for urdf_path in (
-        repo_root / "assets/g1/mode10/g1_23dof_mode_10_with_brainco.urdf",
-        repo_root / "assets/g1/g1_body29_hand14.urdf",
-    ):
-        root = ET.parse(urdf_path).getroot()
-        joints_by_child = {
-            joint.find("child").attrib["link"]: joint for joint in root.findall("joint")
-        }
-        expected_midline = np.zeros(3)
-        link = "d435_link"
-        while link != "pelvis":
-            joint = joints_by_child[link]
-            expected_midline += np.fromstring(
-                joint.find("origin").attrib["xyz"], sep=" "
-            )
-            link = joint.find("parent").attrib["link"]
-        expected_midline[1] = 0.0
-        assert np.allclose(G1_CALIBRATED_HEAD_IN_WAIST_M, expected_midline, atol=5e-6)
+def test_calibrated_head_origin_matches_cad_dimensions():
+    expected_from_cad_mm = np.array([47.64571478, 0.0, 462.68178553])
+    assert np.allclose(
+        G1_CALIBRATED_HEAD_IN_WAIST_M,
+        expected_from_cad_mm / 1000.0,
+        atol=1e-12,
+    )
+
+
+def test_g1_23_wrist_residuals_are_opt_in_and_do_not_change_x():
+    zero_left, zero_right = g1_wrist_target_residuals(
+        "G1_23", use_g1_calibration=False
+    )
+    assert np.array_equal(zero_left, np.zeros(3))
+    assert np.array_equal(zero_right, np.zeros(3))
+
+    left, right = g1_wrist_target_residuals(
+        "G1_23", use_g1_calibration=True
+    )
+    assert np.array_equal(left, G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M)
+    assert np.array_equal(right, G1_23_CALIBRATED_RIGHT_WRIST_RESIDUAL_M)
+    assert left[0] == right[0] == 0.0
+    assert left[1] > 0.0 and right[1] < 0.0
+    assert left[2] == right[2] == -0.0075
+
+    g1_29_left, g1_29_right = g1_wrist_target_residuals(
+        "G1_29", use_g1_calibration=True
+    )
+    assert np.array_equal(g1_29_left, np.zeros(3))
+    assert np.array_equal(g1_29_right, np.zeros(3))
+
+
+def test_wrist_target_residual_preserves_orientation_and_input():
+    wrist = np.eye(4)
+    wrist[:3, 3] = [0.3, 0.2, -0.1]
+    wrist[:3, :3] = np.array(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    original = wrist.copy()
+
+    corrected = apply_wrist_target_residual(
+        wrist, G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M
+    )
+
+    assert np.array_equal(wrist, original)
+    assert np.array_equal(corrected[:3, :3], wrist[:3, :3])
+    assert np.allclose(
+        corrected[:3, 3],
+        wrist[:3, 3] + G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M,
+    )
 
 
 def test_csv_schema_and_row_stay_aligned():

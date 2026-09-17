@@ -23,6 +23,8 @@ from teleop.utils.pose_error_logger import PoseErrorLogger
 from teleop.utils.head_relative_monitor import (
     G1_CALIBRATED_HEAD_IN_WAIST_M,
     HeadRelativeMonitor,
+    apply_wrist_target_residual,
+    g1_wrist_target_residuals,
     head_relative_monitor_run_name,
     retarget_wrist_pose_head_origin,
     robot_head_in_waist,
@@ -175,7 +177,7 @@ if __name__ == '__main__':
     parser.add_argument('--head-relative-monitor-no-viewer', action='store_true',
                         help='Write standalone head-relative CSV without opening a Matplotlib window.')
     parser.add_argument('--g1-head-origin-calibration', action='store_true',
-                        help='Opt in to G1 URDF camera-midline head-to-waist calibration for arm targets. Legacy target geometry remains the default.')
+                        help='Opt in to the G1 CAD head-reference-to-waist calibration for arm targets. G1_23 also applies the calibrated Y/Z wrist residuals; G1_29 keeps zero residuals. Legacy target geometry remains the default.')
 
     args = parser.parse_args()
 
@@ -255,6 +257,11 @@ if __name__ == '__main__':
         active_robot_head_in_waist = robot_head_in_waist(
             args.arm, use_g1_calibration=args.g1_head_origin_calibration
         )
+        left_wrist_target_residual, right_wrist_target_residual = (
+            g1_wrist_target_residuals(
+                args.arm, use_g1_calibration=args.g1_head_origin_calibration
+            )
+        )
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -320,6 +327,12 @@ if __name__ == '__main__':
                 "🎯 G1 head-origin calibration enabled: "
                 f"{G1_CALIBRATED_HEAD_IN_WAIST_M.tolist()} m"
             )
+            if args.arm == "G1_23":
+                logger_mp.info(
+                    "🎯 G1_23 wrist residual calibration enabled: "
+                    f"left={left_wrist_target_residual.tolist()} m, "
+                    f"right={right_wrist_target_residual.tolist()} m"
+                )
         
         
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -494,10 +507,13 @@ if __name__ == '__main__':
                         "sim": args.sim,
                         "mapping": "unscaled_head_relative_xyz",
                         "head_origin_calibration": (
-                            "g1_urdf_camera_midline"
+                            "g1_cad_head_midline"
                             if args.g1_head_origin_calibration
                             else "legacy_virtual_head"
                         ),
+                        "monitor_target": "pre_residual_human_wrist_target",
+                        "left_wrist_target_residual_m": left_wrist_target_residual.tolist(),
+                        "right_wrist_target_residual_m": right_wrist_target_residual.tolist(),
                     },
                     window_seconds=args.head_relative_monitor_window,
                     plot_rate_hz=args.head_relative_monitor_rate,
@@ -537,11 +553,13 @@ if __name__ == '__main__':
                     "frequency": args.frequency,
                     "input_mode": args.input_mode,
                     "head_origin_calibration": (
-                        "g1_urdf_camera_midline"
+                        "g1_cad_head_midline"
                         if args.g1_head_origin_calibration
                         else "legacy_virtual_head"
                     ),
                     "robot_head_in_waist_m": active_robot_head_in_waist.tolist(),
+                    "left_wrist_target_residual_m": left_wrist_target_residual.tolist(),
+                    "right_wrist_target_residual_m": right_wrist_target_residual.tolist(),
                 },
             )
 
@@ -665,6 +683,19 @@ if __name__ == '__main__':
                 tele_data.right_wrist_pose = retarget_wrist_pose_head_origin(
                     tele_data.right_wrist_pose, active_robot_head_in_waist
                 )
+
+            # The monitor retains the calibrated human target before applying
+            # empirical robot corrections.  This keeps future CSV error values
+            # honest: they measure the robot against the human, not against its
+            # corrected IK command.
+            monitor_left_wrist_pose = tele_data.left_wrist_pose.copy()
+            monitor_right_wrist_pose = tele_data.right_wrist_pose.copy()
+            tele_data.left_wrist_pose = apply_wrist_target_residual(
+                tele_data.left_wrist_pose, left_wrist_target_residual
+            )
+            tele_data.right_wrist_pose = apply_wrist_target_residual(
+                tele_data.right_wrist_pose, right_wrist_target_residual
+            )
 
             # head/body-driven locomotion. Updated here, immediately after the tele data
             # arrives and before IK, so solver latency never delays the setpoint. The
@@ -802,8 +833,8 @@ if __name__ == '__main__':
                 head_relative_monitor.log(
                     seq=head_relative_monitor_seq,
                     t_rel=time.monotonic() - head_relative_monitor_start_time,
-                    desired_left=tele_data.left_wrist_pose,
-                    desired_right=tele_data.right_wrist_pose,
+                    desired_left=monitor_left_wrist_pose,
+                    desired_right=monitor_right_wrist_pose,
                     measured_q=current_lr_arm_q,
                     ik_ok=arm_ik.last_solve_ok,
                 )

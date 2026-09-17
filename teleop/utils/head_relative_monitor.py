@@ -25,10 +25,22 @@ logger_mp = logging_mp.getLogger(__name__)
 # calibration can be trialled explicitly before changing established control
 # behaviour.
 ROBOT_HEAD_IN_WAIST_M = np.array([0.15, 0.0, 0.45], dtype=float)
-# G1 camera origin expressed in the fixed-pelvis IK frame at neutral waist.
-# The physical D435 is 17.53 mm left of centre; use the robot sagittal plane as
-# the head origin so left/right arm targets remain symmetric.
-G1_CALIBRATED_HEAD_IN_WAIST_M = np.array([0.05366, 0.0, 0.47387], dtype=float)
+# G1 CAD head reference expressed in the fixed-pelvis IK frame.  The source
+# drawing dimensions the point 47.64571478 mm forward and 462.68178553 mm up
+# from the frame origin.  Keep it on the sagittal plane so left/right targets
+# remain symmetric.
+G1_CALIBRATED_HEAD_IN_WAIST_M = np.array(
+    [0.04764571478, 0.0, 0.46268178553], dtype=float
+)
+# Residual translation measured from the best G1_23 + BrainCo physical session.
+# X is intentionally untouched: the remaining long-reach error is the robot's
+# accepted physical limit.  Y moves each hand outward; Z moves both hands down.
+G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M = np.array(
+    [0.0, 0.0059, -0.0075], dtype=float
+)
+G1_23_CALIBRATED_RIGHT_WRIST_RESIDUAL_M = np.array(
+    [0.0, -0.0050, -0.0075], dtype=float
+)
 SUPPORTED_G1_ARMS = frozenset(("G1_23", "G1_29"))
 
 _ARMS = ("left", "right")
@@ -75,6 +87,38 @@ def robot_head_in_waist(arm, use_g1_calibration=False):
         else ROBOT_HEAD_IN_WAIST_M
     )
     return selected.copy()
+
+
+def g1_wrist_target_residuals(arm, use_g1_calibration=False):
+    """Return per-arm xyz corrections enabled by the opt-in G1 calibration.
+
+    The residuals were measured for G1_23.  G1_29 keeps zero residuals until it
+    has its own physical calibration data.
+    """
+    if use_g1_calibration and arm not in SUPPORTED_G1_ARMS:
+        raise ValueError(
+            "G1 wrist target residuals support G1 teleoperation only "
+            f"(got {arm})."
+        )
+    if use_g1_calibration and arm == "G1_23":
+        return (
+            G1_23_CALIBRATED_LEFT_WRIST_RESIDUAL_M.copy(),
+            G1_23_CALIBRATED_RIGHT_WRIST_RESIDUAL_M.copy(),
+        )
+    return np.zeros(3, dtype=float), np.zeros(3, dtype=float)
+
+
+def apply_wrist_target_residual(wrist_pose, residual_m):
+    """Translate an IK wrist target without changing its orientation or input."""
+    pose = np.asarray(wrist_pose, dtype=float)
+    residual = np.asarray(residual_m, dtype=float)
+    if pose.shape != (4, 4) or not np.all(np.isfinite(pose)):
+        raise ValueError("wrist_pose must be a finite 4x4 pose")
+    if residual.shape != (3,) or not np.all(np.isfinite(residual)):
+        raise ValueError("residual_m must be a finite xyz vector")
+    corrected = pose.copy()
+    corrected[:3, 3] += residual
+    return corrected
 
 
 def retarget_wrist_pose_head_origin(

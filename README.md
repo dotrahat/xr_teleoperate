@@ -245,7 +245,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 | `--head-relative-monitor-window` | Rolling live-plot window in seconds. Default: `20.0` |
 | `--head-relative-monitor-rate` | Live-plot redraw rate in Hz; CSV logging still receives every submitted control sample. Default: `10.0` |
 | `--head-relative-monitor-no-viewer` | Write `head_relative.csv` and `run_meta.json` without opening Matplotlib. `--headless` also disables the viewer. |
-| `--g1-head-origin-calibration` | Opt in to the G1 URDF camera-midline head origin for arm targets. This moves targets about 9.6 cm rearward and 2.4 cm upward relative to the legacy mapping; the legacy geometry remains the default. G1 only. |
+| `--g1-head-origin-calibration` | Opt in to the G1 CAD head-reference origin for arm targets. On G1_23 it also applies the physically tested residual wrist translations: no X correction, 5.9 mm outward left, 5.0 mm outward right, and 7.5 mm downward on both. G1_29 keeps zero wrist residual until physically calibrated. The legacy geometry remains the default. G1 only. |
 | `--task-dir` | Path to save recorded data. Default: `./utils/data/` |
 | `--task-name` | Task file name for recording. Default: `pick cube` |
 | `--task-goal` | Task goal recorded in the json file. Default: `pick up cube.` |
@@ -258,7 +258,7 @@ The head-relative monitor is independent of episode recording and remains off un
 (tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --arm=G1_29 --ee=dex3 --sim --head-relative-monitor --head-relative-monitor-no-viewer
 ```
 
-The optional G1 head-origin calibration uses the robot camera height and sagittal midline rather than the legacy virtual head point. Session analysis showed that this reduces IK saturation for long forward and low reaches. Trial it with the robot supported and at low reach first; it changes physical arm targets and may reduce torso clearance. When the monitor or pose-error logger is enabled, its metadata records both the selected calibration and exact xyz origin:
+The optional G1 head-origin calibration uses the CAD-measured head reference on the robot sagittal midline: `[0.04764571478, 0.0, 0.46268178553]` metres in the fixed-pelvis IK frame. For G1_23, physical-session measurements also produced residual target translations of `[0.0, 0.0059, -0.0075]` metres on the left and `[0.0, -0.0050, -0.0075]` metres on the right. The X correction remains zero because the remaining error beyond 35 cm is the accepted physical reach limit. G1_29 keeps zero wrist residual until it has its own physical calibration. Trial calibration with the robot supported and at low reach first; it changes physical arm targets and may reduce torso clearance. When the monitor or pose-error logger is enabled, its metadata records the selected calibration and exact offsets. The head-relative monitor continues logging the pre-residual human target so measured error remains independent of the correction:
 
 ```bash
 (tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --arm=G1_23 --ee=brainco --motion --g1-head-origin-calibration --head-relative-monitor
