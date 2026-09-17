@@ -25,6 +25,6 @@ pose_logs/
 head_relative_logs/
 .vscode/
 *.pkl
-
+teleop/utils/head_relative_logs/
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
