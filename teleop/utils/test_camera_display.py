@@ -3,7 +3,12 @@
 import numpy as np
 import pytest
 
-from teleop.utils.camera_display import CameraDisplay, camera_configs, resolve_camera_names
+from teleop.utils.camera_display import (
+    CameraDisplay,
+    TripleDoublePinchGesture,
+    camera_configs,
+    resolve_camera_names,
+)
 
 
 CONFIG = {
@@ -86,3 +91,62 @@ def test_binocular_reference_duplicates_multi_camera_dashboard_for_both_eyes():
     canvas = display.compose({"head_camera": head})
     assert canvas.shape == (60, 160, 3)
     np.testing.assert_array_equal(canvas[:, :80], canvas[:, 80:])
+
+
+def _double_pinch_cycle(gesture, start):
+    assert not gesture.update(True, False, start)
+    triggered = gesture.update(True, True, start + 0.05)
+    assert not gesture.update(False, False, start + 0.15)
+    return triggered
+
+
+def test_triple_double_pinch_triggers_once_after_three_released_cycles():
+    gesture = TripleDoublePinchGesture()
+    assert not gesture.update(False, False, -0.1)
+    assert not _double_pinch_cycle(gesture, 0.0)
+    assert not _double_pinch_cycle(gesture, 0.6)
+    assert _double_pinch_cycle(gesture, 1.2)
+
+
+def test_held_double_pinch_counts_only_once():
+    gesture = TripleDoublePinchGesture()
+    assert not gesture.update(False, False, -0.1)
+    assert not gesture.update(True, True, 0.0)
+    for now in (0.1, 0.5, 1.0, 2.0):
+        assert not gesture.update(True, True, now)
+
+
+def test_gesture_requires_an_initial_fully_released_sample():
+    gesture = TripleDoublePinchGesture(required_cycles=1)
+    assert not gesture.update(True, True, 0.0)
+    assert not gesture.update(False, False, 0.1)
+    assert gesture.update(True, True, 0.2)
+
+
+def test_pinch_held_through_cooldown_does_not_start_a_new_cycle():
+    gesture = TripleDoublePinchGesture(required_cycles=1, cooldown_s=1.0)
+    assert not gesture.update(False, False, -0.1)
+    assert gesture.update(True, True, 0.0)
+    assert not gesture.update(False, False, 0.1)
+    assert not gesture.update(True, True, 0.2)
+    assert not gesture.update(True, True, 1.2)
+
+
+def test_unsynchronized_pinches_do_not_count():
+    gesture = TripleDoublePinchGesture(sync_window_s=0.2)
+    assert not gesture.update(False, False, -0.1)
+    assert not gesture.update(True, False, 0.0)
+    assert not gesture.update(True, True, 0.3)
+    assert not gesture.update(False, False, 0.4)
+    assert not _double_pinch_cycle(gesture, 0.8)
+    assert not _double_pinch_cycle(gesture, 1.4)
+
+
+def test_triple_double_pinch_sequence_expires_and_requires_three_new_cycles():
+    gesture = TripleDoublePinchGesture(sequence_timeout_s=1.0)
+    assert not gesture.update(False, False, -0.1)
+    assert not _double_pinch_cycle(gesture, 0.0)
+    assert not _double_pinch_cycle(gesture, 0.4)
+    assert not _double_pinch_cycle(gesture, 1.6)
+    assert not _double_pinch_cycle(gesture, 2.0)
+    assert _double_pinch_cycle(gesture, 2.4)

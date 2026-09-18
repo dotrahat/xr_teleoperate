@@ -31,7 +31,11 @@ from teleop.utils.head_relative_monitor import (
     validate_head_relative_monitor_config,
 )
 from teleop.utils.ipc import IPC_Server
-from teleop.utils.camera_display import CameraDisplay, resolve_camera_names
+from teleop.utils.camera_display import (
+    CameraDisplay,
+    TripleDoublePinchGesture,
+    resolve_camera_names,
+)
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
                                               deadman_is_available, joystick_twist, LatchingToggle)
@@ -91,6 +95,20 @@ def get_state() -> dict:
         "RECORD_RUNNING": RECORD_RUNNING,
     }
 
+
+def update_camera_switch_gesture(gesture, camera_display, tele_data):
+    """Cycle the XR camera when the deliberate hand gesture completes."""
+    if gesture is None:
+        return False
+    if not tele_data.motion_data_ready:
+        gesture.reset()
+        return False
+    if gesture.update(tele_data.left_hand_pinch, tele_data.right_hand_pinch):
+        camera_name = camera_display.cycle()
+        logger_mp.info(f"📷 XR camera gesture accepted: {camera_name}")
+        return True
+    return False
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
@@ -103,6 +121,11 @@ if __name__ == '__main__':
     parser.add_argument('--xr-cameras', type=str, default='auto',
                         help='Camera topics shown in XR: "auto" (head camera, or first enabled), "all", '
                              'or a comma-separated list such as head_camera,left_wrist_camera.')
+    parser.add_argument('--xr-camera-gesture', type=str, choices=['triple-double-pinch', 'off'],
+                        default='triple-double-pinch',
+                        help='Meta Quest hand gesture for cycling cameras in single layout. '
+                             '"triple-double-pinch" requires three synchronized two-hand pinch/release '
+                             'cycles; "off" disables gesture switching.')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2', 'R1_A5', 'R1_A7'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     parser.add_argument('--arm-reference-mode', type=str, choices=['head_yaw', 'head_position'], default='head_yaw',
@@ -346,6 +369,33 @@ if __name__ == '__main__':
         )
         if args.xr_camera_layout == 'single' and len(selected_camera_names) > 1:
             logger_mp.info("📷 Press [c] (or send IPC command 'c') to cycle XR cameras.")
+
+        camera_switch_gesture = None
+        gesture_requested = args.xr_camera_gesture == 'triple-double-pinch'
+        gesture_conflicts_with_locomotion = (
+            args.head_loco
+            and args.loco_gate == 'hold'
+            and args.loco_deadman in ('left_pinch', 'right_pinch')
+        )
+        if (
+            gesture_requested
+            and args.input_mode == 'hand'
+            and args.display_mode != 'pass-through'
+            and args.xr_camera_layout == 'single'
+            and len(selected_camera_names) > 1
+            and not gesture_conflicts_with_locomotion
+        ):
+            camera_switch_gesture = TripleDoublePinchGesture()
+            logger_mp.info(
+                "📷 Quest camera gesture enabled: pinch both hands together three times, "
+                "fully releasing both hands between pinches."
+            )
+        elif gesture_requested and gesture_conflicts_with_locomotion:
+            logger_mp.warning(
+                "📷 Quest camera gesture disabled because the selected head-locomotion "
+                "deadman also uses pinch. Choose a fist deadman or pass "
+                "--xr-camera-gesture=off."
+            )
 
         # televuer_wrapper: obtain XR poses and display either one direct stream or a
         # locally composed canvas containing the selected camera streams.
@@ -669,6 +719,11 @@ if __name__ == '__main__':
                     for name in camera_display.displayed_camera_names
                 }
                 tv_wrapper.render_to_xr(camera_display.compose(display_frames))
+            if camera_switch_gesture is not None:
+                preview_tele_data = tv_wrapper.get_tele_data()
+                update_camera_switch_gesture(
+                    camera_switch_gesture, camera_display, preview_tele_data
+                )
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -720,6 +775,7 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            update_camera_switch_gesture(camera_switch_gesture, camera_display, tele_data)
             if args.g1_head_origin_calibration:
                 tele_data.left_wrist_pose = retarget_wrist_pose_head_origin(
                     tele_data.left_wrist_pose, active_robot_head_in_waist

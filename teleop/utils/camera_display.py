@@ -3,10 +3,101 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Mapping
 
 import cv2
 import numpy as np
+
+
+class TripleDoublePinchGesture:
+    """Detect three synchronized two-hand pinch/release cycles.
+
+    A cycle counts only when the left and right pinch rising edges occur within
+    ``sync_window_s`` and both hands have fully released since the previous
+    cycle.  Holding a pinch cannot generate repeats.  This makes the gesture
+    substantially less likely during normal one-handed or bimanual grasping.
+    """
+
+    def __init__(
+        self,
+        required_cycles: int = 3,
+        sync_window_s: float = 0.20,
+        sequence_timeout_s: float = 2.50,
+        cooldown_s: float = 1.00,
+    ):
+        if required_cycles < 1:
+            raise ValueError("required_cycles must be positive")
+        if min(sync_window_s, sequence_timeout_s, cooldown_s) <= 0.0:
+            raise ValueError("gesture timing values must be positive")
+        self.required_cycles = required_cycles
+        self.sync_window_s = sync_window_s
+        self.sequence_timeout_s = sequence_timeout_s
+        self.cooldown_s = cooldown_s
+        self.reset()
+
+    def reset(self) -> None:
+        self._previous_left = False
+        self._previous_right = False
+        self._left_rise_time = None
+        self._right_rise_time = None
+        # Require one observed fully-open sample before accepting the first cycle.
+        # This prevents a gesture from starting halfway through tracking recovery.
+        self._cycle_armed = False
+        self._cycle_count = 0
+        self._sequence_deadline = None
+        self._cooldown_until = 0.0
+
+    def update(self, left_pinching: bool, right_pinching: bool, now: float | None = None) -> bool:
+        """Consume one sample and return ``True`` once per completed gesture."""
+        now = time.monotonic() if now is None else float(now)
+        left_pinching = bool(left_pinching)
+        right_pinching = bool(right_pinching)
+
+        left_rose = left_pinching and not self._previous_left
+        right_rose = right_pinching and not self._previous_right
+        if left_rose:
+            self._left_rise_time = now
+        if right_rose:
+            self._right_rise_time = now
+
+        both_released = not left_pinching and not right_pinching
+        if both_released:
+            self._cycle_armed = True
+            self._left_rise_time = None
+            self._right_rise_time = None
+
+        if self._sequence_deadline is not None and now > self._sequence_deadline:
+            self._cycle_count = 0
+            self._sequence_deadline = None
+
+        triggered = False
+        synchronized = (
+            self._left_rise_time is not None
+            and self._right_rise_time is not None
+            and abs(self._left_rise_time - self._right_rise_time) <= self.sync_window_s
+        )
+        if (
+            now >= self._cooldown_until
+            and self._cycle_armed
+            and left_pinching
+            and right_pinching
+            and synchronized
+            and (left_rose or right_rose)
+        ):
+            self._cycle_armed = False
+            if self._cycle_count == 0:
+                self._sequence_deadline = now + self.sequence_timeout_s
+            self._cycle_count += 1
+            if self._cycle_count >= self.required_cycles:
+                triggered = True
+                self._cycle_count = 0
+                self._sequence_deadline = None
+                self._cooldown_until = now + self.cooldown_s
+
+        self._previous_left = left_pinching
+        self._previous_right = right_pinching
+        return triggered
 
 
 def camera_configs(config: Mapping) -> dict[str, Mapping]:
