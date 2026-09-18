@@ -4,8 +4,10 @@ import numpy as np
 import pytest
 
 from teleop.utils.camera_display import (
+    AlternatingFistGesture,
     CameraDisplay,
     DualRingPinchGesture,
+    TripleDoublePinchGesture,
     camera_configs,
     resolve_camera_names,
 )
@@ -169,3 +171,35 @@ def test_invalid_or_missing_hand_tracking_cannot_trigger():
     wrist = _wrist_pose("left")
     assert not gesture.update(np.zeros((0, 3)), valid, wrist, _wrist_pose("right"), now=0.0)
     assert not gesture.update(np.zeros((0, 3)), valid, wrist, _wrist_pose("right"), now=1.0)
+
+
+def _fist_step(gesture, hand, start):
+    pose = (True, False) if hand == "left" else (False, True)
+    assert not gesture.update(*pose, start)
+    triggered = gesture.update(*pose, start + 0.21)
+    assert not gesture.update(False, False, start + 0.25)
+    return triggered
+
+
+def test_alternating_fists_remains_available_for_comparison():
+    gesture = AlternatingFistGesture()
+    assert not gesture.update(False, False, -0.1)
+    assert not _fist_step(gesture, "left", 0.0)
+    assert not _fist_step(gesture, "right", 0.6)
+    assert not _fist_step(gesture, "left", 1.2)
+    assert _fist_step(gesture, "right", 1.8)
+
+
+def _double_pinch_cycle(gesture, start):
+    assert not gesture.update(True, False, start)
+    triggered = gesture.update(True, True, start + 0.05)
+    assert not gesture.update(False, False, start + 0.15)
+    return triggered
+
+
+def test_triple_double_pinch_remains_available_for_comparison():
+    gesture = TripleDoublePinchGesture()
+    assert not gesture.update(False, False, -0.1)
+    assert not _double_pinch_cycle(gesture, 0.0)
+    assert not _double_pinch_cycle(gesture, 0.6)
+    assert _double_pinch_cycle(gesture, 1.2)

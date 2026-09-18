@@ -226,7 +226,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
 | `--xr-camera-layout` | Choose whether XR shows one selected camera or all selected cameras side by side | `single` `side-by-side` | `single` |
 |   `--xr-cameras`     | Select camera topics to show. Use `auto`, `all`, or a comma-separated list from the TeleImage server config | Camera topic names | `auto` |
-| `--xr-camera-gesture` | Select the Meta Quest hand gesture for cycling cameras in `single` layout | `dual-ring-pinch` `off` | `dual-ring-pinch` |
+| `--xr-camera-gesture` | Select the Meta Quest hand gesture for cycling cameras in `single` layout | `dual-ring-pinch` `alternating-fists` `triple-double-pinch` `off` | `dual-ring-pinch` |
 |        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       | `G1_29` `G1_23` `H1_2` `H1` `H2` `R1_A5` `R1_A7` |      `G1_29`      |
 |        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
 | `--arm-reference-mode` | Choose whether arm targets follow head yaw or only head position | `head_yaw` `head_position` | `head_yaw` |
@@ -341,6 +341,14 @@ fingers straight, face both palms toward the headset, and hold the complete pose
 continuously for three seconds. It uses geometric hand-joint tracking rather than
 Meta's index-finger pinch action. After switching, release the pose before using it
 again. Use `--xr-camera-gesture=off` to disable it.
+
+The earlier gesture variants remain available for comparison testing:
+
+- `--xr-camera-gesture=alternating-fists`: left fist, open both hands, right fist,
+  open, left fist, open, then right fist; complete within four seconds.
+- `--xr-camera-gesture=triple-double-pinch`: pinch with both hands together three
+  times within 2.5 seconds, fully releasing both hands between pinches. This option
+  can overlap Meta's system pinch interaction, so it is intended for comparison only.
 
 After the program starts, the terminal shows:
 
