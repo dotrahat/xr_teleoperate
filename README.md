@@ -224,6 +224,8 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |     `--frequency`     |            Set the FPS for recording and control             |                  Any reasonable float value                  |       30.0        |
 |    `--input-mode`     |       Choose XR input mode (how to control the robot)        |   `hand` (hand tracking)`controller` (controller tracking)   |      `hand`       |
 |   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
+| `--xr-camera-layout` | Choose whether XR shows one selected camera or all selected cameras side by side | `single` `side-by-side` | `single` |
+|   `--xr-cameras`     | Select camera topics to show. Use `auto`, `all`, or a comma-separated list from the TeleImage server config | Camera topic names | `auto` |
 |        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       | `G1_29` `G1_23` `H1_2` `H1` `H2` `R1_A5` `R1_A7` |      `G1_29`      |
 |        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
 | `--arm-reference-mode` | Choose whether arm targets follow head yaw or only head position | `head_yaw` `head_position` | `head_yaw` |
@@ -318,6 +320,21 @@ Assuming hand tracking with G1(29 DoF) + Dex3 in simulation with recording:
 (tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --record
 ```
 
+To show all simulation cameras side by side in the headset:
+
+```bash
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --xr-cameras=all --xr-camera-layout=side-by-side
+```
+
+To show one camera at a time and cycle through a chosen subset with **c**:
+
+```bash
+(tv) unitree@Host:~/xr_teleoperate/teleop/$ python teleop_hand_and_arm.py --ee=dex3 --sim --xr-cameras=head_camera,left_wrist_camera,right_wrist_camera --xr-camera-layout=single
+```
+
+Multi-camera composition and cycling use each selected camera's ZMQ stream. Ensure
+`enable_zmq: true` for those camera topics in the TeleImage server configuration.
+
 After the program starts, the terminal shows:
 
 <p align="center">   <a href="https://oss-global-cdn.unitree.com/static/735464d237214f6c9edf8c7db9847a0a_1874x1275.png">     <img src="https://oss-global-cdn.unitree.com/static/735464d237214f6c9edf8c7db9847a0a_1874x1275.png" alt="Terminal Start Log" style="width: 75%;">   </a> </p>
@@ -380,6 +397,8 @@ Next steps:
 8. Press **r** in the terminal to begin teleoperation. You can now control the robot arm and dexterous hand.
 
 9. During teleoperation, press **s** to start recording; press **s** again to stop and save. Repeatable process.
+
+10. With multiple cameras selected in `single` layout, press **c** (or send IPC command `c`) to show the next camera.
 
 <p align="center">  <a href="https://oss-global-cdn.unitree.com/static/f5b9b03df89e45ed8601b9a91adab37a_2397x1107.png">    <img src="https://oss-global-cdn.unitree.com/static/f5b9b03df89e45ed8601b9a91adab37a_2397x1107.png" alt="Recording Process" style="width: 75%;">  </a> </p>
 
