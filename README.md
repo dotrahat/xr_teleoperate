@@ -226,7 +226,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |   `--display-mode`    |  Choose XR display mode (how to view the robot perspective)  | `immersive` (immersive)`ego` (pass-through + small first-person window)`pass-through` (pass-through only) |    `immersive`    |
 | `--xr-camera-layout` | Choose whether XR shows one selected camera or all selected cameras side by side | `single` `side-by-side` | `single` |
 |   `--xr-cameras`     | Select camera topics to show. Use `auto`, `all`, or a comma-separated list from the TeleImage server config | Camera topic names | `auto` |
-| `--xr-camera-gesture` | Select the Meta Quest hand gesture for cycling cameras in `single` layout | `alternating-fists` `off` | `alternating-fists` |
+| `--xr-camera-gesture` | Select the Meta Quest hand gesture for cycling cameras in `single` layout | `dual-ring-pinch` `off` | `dual-ring-pinch` |
 |        `--arm`        |      Select the robot arm type (see 0. 📖 Introduction)       | `G1_29` `G1_23` `H1_2` `H1` `H2` `R1_A5` `R1_A7` |      `G1_29`      |
 |        `--ee`         | Select the end-effector type of the arm (see 0. 📖 Introduction) |     `dex1` `dex3` `inspire_ftp` `inspire_dfx` `brainco`      |       None        |
 | `--arm-reference-mode` | Choose whether arm targets follow head yaw or only head position | `head_yaw` `head_position` | `head_yaw` |
@@ -335,12 +335,12 @@ To show one camera at a time and cycle through a chosen subset with **c**:
 
 Multi-camera composition and cycling use each selected camera's ZMQ stream. Ensure
 `enable_zmq: true` for those camera topics in the TeleImage server configuration.
-In hand-tracking mode, the default Quest gesture also cycles cameras: make a left
-fist, fully open both hands, then right fist, open, left fist, open, and right fist.
-Each fist must be held briefly and the sequence must finish within four seconds.
-Both fists together, the wrong order, a held fist, or a missing release resets the
-sequence. This avoids Meta's system pinch action. Use `--xr-camera-gesture=off` to
-disable it.
+In hand-tracking mode, the default Quest gesture also cycles cameras: touch the
+thumb tip to the ring fingertip on both hands, keep the index, middle, and little
+fingers straight, face both palms toward the headset, and hold the complete pose
+continuously for three seconds. It uses geometric hand-joint tracking rather than
+Meta's index-finger pinch action. After switching, release the pose before using it
+again. Use `--xr-camera-gesture=off` to disable it.
 
 After the program starts, the terminal shows:
 
@@ -405,7 +405,7 @@ Next steps:
 
 9. During teleoperation, press **s** to start recording; press **s** again to stop and save. Repeatable process.
 
-10. With multiple cameras selected in `single` layout, press **c**, send IPC command `c`, or perform the left-right-left-right fist sequence to show the next camera.
+10. With multiple cameras selected in `single` layout, press **c**, send IPC command `c`, or hold the two-hand thumb-to-ring pose toward the headset for three seconds to show the next camera.
 
 <p align="center">  <a href="https://oss-global-cdn.unitree.com/static/f5b9b03df89e45ed8601b9a91adab37a_2397x1107.png">    <img src="https://oss-global-cdn.unitree.com/static/f5b9b03df89e45ed8601b9a91adab37a_2397x1107.png" alt="Recording Process" style="width: 75%;">  </a> </p>
 

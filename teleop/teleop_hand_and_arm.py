@@ -32,8 +32,8 @@ from teleop.utils.head_relative_monitor import (
 )
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.camera_display import (
-    AlternatingFistGesture,
     CameraDisplay,
+    DualRingPinchGesture,
     resolve_camera_names,
 )
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
@@ -103,7 +103,12 @@ def update_camera_switch_gesture(gesture, camera_display, tele_data):
     if not tele_data.motion_data_ready:
         gesture.reset()
         return False
-    if gesture.update(tele_data.left_hand_squeeze, tele_data.right_hand_squeeze):
+    if gesture.update(
+        tele_data.left_hand_pos,
+        tele_data.right_hand_pos,
+        tele_data.left_wrist_pose,
+        tele_data.right_wrist_pose,
+    ):
         camera_name = camera_display.cycle()
         logger_mp.info(f"📷 XR camera gesture accepted: {camera_name}")
         return True
@@ -121,11 +126,12 @@ if __name__ == '__main__':
     parser.add_argument('--xr-cameras', type=str, default='auto',
                         help='Camera topics shown in XR: "auto" (head camera, or first enabled), "all", '
                              'or a comma-separated list such as head_camera,left_wrist_camera.')
-    parser.add_argument('--xr-camera-gesture', type=str, choices=['alternating-fists', 'off'],
-                        default='alternating-fists',
+    parser.add_argument('--xr-camera-gesture', type=str, choices=['dual-ring-pinch', 'off'],
+                        default='dual-ring-pinch',
                         help='Meta Quest hand gesture for cycling cameras in single layout. '
-                             '"alternating-fists" requires left-right-left-right fists with both '
-                             'hands fully open between steps; "off" disables gesture switching.')
+                             '"dual-ring-pinch" requires both thumb/ring fingertips touching, '
+                             'other fingers straight, and palms facing the headset for three seconds; '
+                             '"off" disables gesture switching.')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2', 'R1_A5', 'R1_A7'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     parser.add_argument('--arm-reference-mode', type=str, choices=['head_yaw', 'head_position'], default='head_yaw',
@@ -371,30 +377,19 @@ if __name__ == '__main__':
             logger_mp.info("📷 Press [c] (or send IPC command 'c') to cycle XR cameras.")
 
         camera_switch_gesture = None
-        gesture_requested = args.xr_camera_gesture == 'alternating-fists'
-        gesture_conflicts_with_locomotion = (
-            args.head_loco
-            and args.loco_gate == 'hold'
-            and args.loco_deadman in ('left_fist', 'right_fist', 'both_fist')
-        )
+        gesture_requested = args.xr_camera_gesture == 'dual-ring-pinch'
         if (
             gesture_requested
             and args.input_mode == 'hand'
             and args.display_mode != 'pass-through'
             and args.xr_camera_layout == 'single'
             and len(selected_camera_names) > 1
-            and not gesture_conflicts_with_locomotion
         ):
-            camera_switch_gesture = AlternatingFistGesture()
+            camera_switch_gesture = DualRingPinchGesture()
             logger_mp.info(
-                "📷 Quest camera gesture enabled: make left-right-left-right fists, "
-                "fully opening both hands between steps."
-            )
-        elif gesture_requested and gesture_conflicts_with_locomotion:
-            logger_mp.warning(
-                "📷 Quest camera gesture disabled because the selected head-locomotion "
-                "deadman also uses a fist. Pass --xr-camera-gesture=off or choose a "
-                "non-conflicting locomotion setup."
+                "📷 Quest camera gesture enabled: touch thumb to ring fingertip on both "
+                "hands, keep the other fingers straight, face both palms toward the "
+                "headset, and hold for three seconds."
             )
 
         # televuer_wrapper: obtain XR poses and display either one direct stream or a

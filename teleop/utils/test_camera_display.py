@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from teleop.utils.camera_display import (
-    AlternatingFistGesture,
     CameraDisplay,
+    DualRingPinchGesture,
     camera_configs,
     resolve_camera_names,
 )
@@ -93,66 +93,79 @@ def test_binocular_reference_duplicates_multi_camera_dashboard_for_both_eyes():
     np.testing.assert_array_equal(canvas[:, :80], canvas[:, 80:])
 
 
-def _fist_step(gesture, hand, start):
-    pose = (True, False) if hand == "left" else (False, True)
-    assert not gesture.update(*pose, start)
-    triggered = gesture.update(*pose, start + 0.21)
-    assert not gesture.update(False, False, start + 0.25)
-    return triggered
+def _ring_pinch_hand():
+    hand = np.zeros((25, 3), dtype=float)
+    # Straight index, middle, and little fingers. The WebXR joint groups are
+    # metacarpal -> proximal -> intermediate -> distal -> tip.
+    for indices, y in (((5, 6, 7, 8, 9), -0.02),
+                       ((10, 11, 12, 13, 14), 0.0),
+                       ((20, 21, 22, 23, 24), 0.04)):
+        for offset, index in enumerate(indices):
+            hand[index] = [0.04 + 0.015 * offset, y, 0.0]
+    hand[4] = [0.09, 0.02, 0.0]     # thumb tip
+    hand[19] = [0.091, 0.02, 0.0]   # ring tip touching thumb
+    return hand
 
 
-def _complete_fist_code(gesture, start=0.0):
-    assert not _fist_step(gesture, "left", start)
-    assert not _fist_step(gesture, "right", start + 0.6)
-    assert not _fist_step(gesture, "left", start + 1.2)
-    return _fist_step(gesture, "right", start + 1.8)
+def _wrist_pose(side):
+    pose = np.eye(4)
+    # With identity rotation, left palm normal is -Y and right is +Y.
+    pose[:3, 3] = [0.15, 0.30 if side == "left" else -0.30, 0.45]
+    return pose
 
 
-def test_alternating_fist_code_triggers_once_in_the_correct_order():
-    gesture = AlternatingFistGesture()
-    assert not gesture.update(False, False, -0.1)
-    assert _complete_fist_code(gesture)
+def test_dual_ring_pinch_matches_requested_hand_geometry():
+    gesture = DualRingPinchGesture()
+    hand = _ring_pinch_hand()
+    assert gesture.hand_matches(hand, _wrist_pose("left"), "left")
+    assert gesture.hand_matches(hand, _wrist_pose("right"), "right")
 
 
-def test_held_fist_counts_only_once_and_release_is_required():
-    gesture = AlternatingFistGesture()
-    assert not gesture.update(False, False, -0.1)
-    assert not gesture.update(True, False, 0.0)
-    assert not gesture.update(True, False, 0.21)
-    for now in (0.5, 1.0, 2.0):
-        assert not gesture.update(True, False, now)
+def test_ring_tip_must_touch_thumb_tip():
+    gesture = DualRingPinchGesture()
+    hand = _ring_pinch_hand()
+    hand[19] = [0.16, 0.02, 0.0]
+    assert not gesture.hand_matches(hand, _wrist_pose("left"), "left")
 
 
-def test_gesture_requires_an_initial_fully_released_sample():
-    gesture = AlternatingFistGesture()
-    assert not gesture.update(True, False, 0.0)
-    assert not gesture.update(True, False, 0.3)
-    assert not gesture.update(False, False, 0.4)
-    assert not _fist_step(gesture, "left", 0.5)
+def test_index_middle_and_little_fingers_must_remain_straight():
+    gesture = DualRingPinchGesture()
+    hand = _ring_pinch_hand()
+    hand[7] += [0.0, 0.06, 0.0]
+    assert not gesture.hand_matches(hand, _wrist_pose("left"), "left")
 
 
-def test_both_fists_or_wrong_order_resets_the_sequence():
-    gesture = AlternatingFistGesture()
-    assert not gesture.update(False, False, -0.1)
-    assert not _fist_step(gesture, "left", 0.0)
-    assert not gesture.update(True, True, 0.6)
-    assert not gesture.update(True, True, 0.9)
-    assert not gesture.update(False, False, 1.0)
-    assert _complete_fist_code(gesture, 1.1)
+def test_palm_must_face_the_headset():
+    gesture = DualRingPinchGesture()
+    wrist = _wrist_pose("left")
+    wrist[:3, :3] = np.diag([1.0, -1.0, -1.0])
+    assert not gesture.hand_matches(_ring_pinch_hand(), wrist, "left")
 
 
-def test_alternating_fist_sequence_expires_and_restarts_from_left():
-    gesture = AlternatingFistGesture(sequence_timeout_s=3.0)
-    assert not gesture.update(False, False, -0.1)
-    assert not _fist_step(gesture, "left", 0.0)
-    assert not _fist_step(gesture, "right", 3.5)
-    assert _complete_fist_code(gesture, 4.0)
+def test_dual_ring_pinch_requires_three_continuous_seconds_and_latches():
+    gesture = DualRingPinchGesture()
+    left_hand = _ring_pinch_hand()
+    right_hand = _ring_pinch_hand()
+    left_wrist = _wrist_pose("left")
+    right_wrist = _wrist_pose("right")
+
+    args = (left_hand, right_hand, left_wrist, right_wrist)
+    assert not gesture.update(*args, now=0.0)
+    assert not gesture.update(*args, now=2.99)
+    assert gesture.update(*args, now=3.0)
+    assert not gesture.update(*args, now=6.0)
+
+    # Breaking the pose rearms it; the next valid pose needs a fresh full hold.
+    released = right_hand.copy()
+    released[19] = [0.16, 0.02, 0.0]
+    assert not gesture.update(left_hand, released, left_wrist, right_wrist, now=6.1)
+    assert not gesture.update(*args, now=7.0)
+    assert gesture.update(*args, now=10.0)
 
 
-def test_gesture_does_not_restart_while_cooling_down():
-    gesture = AlternatingFistGesture(cooldown_s=1.0)
-    assert not gesture.update(False, False, -0.1)
-    assert _complete_fist_code(gesture)
-    assert not gesture.update(True, False, 2.2)
-    assert not gesture.update(True, False, 3.3)
-    assert not gesture.update(False, False, 3.4)
+def test_invalid_or_missing_hand_tracking_cannot_trigger():
+    gesture = DualRingPinchGesture(hold_s=0.1)
+    valid = _ring_pinch_hand()
+    wrist = _wrist_pose("left")
+    assert not gesture.update(np.zeros((0, 3)), valid, wrist, _wrist_pose("right"), now=0.0)
+    assert not gesture.update(np.zeros((0, 3)), valid, wrist, _wrist_pose("right"), now=1.0)

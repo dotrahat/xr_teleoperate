@@ -10,104 +10,138 @@ import cv2
 import numpy as np
 
 
-class AlternatingFistGesture:
-    """Detect the deliberate left-right-left-right fist sequence.
+class DualRingPinchGesture:
+    """Detect a two-hand thumb-to-ring pinch pose held toward the headset.
 
-    Every fist must be held for ``hold_s`` and followed by a fully open sample.
-    Both fists, the wrong hand, a held pose, or an expired sequence reset the
-    detector.  The asymmetric four-step code avoids Meta's pinch interaction
-    and is very unlikely to occur during ordinary manipulation.
+    Both thumb tips must touch their ring fingertips, while index, middle, and
+    little fingers remain straight.  Both palms must face the headset.  The full
+    pose must remain valid continuously for ``hold_s`` and must be released
+    after a trigger before it can trigger again.
     """
 
-    _PATTERN = ("left", "right", "left", "right")
+    _WRIST = 0
+    _THUMB_TIP = 4
+    _MIDDLE_METACARPAL = 10
+    _RING_TIP = 19
+    _STRAIGHT_FINGERS = (
+        (5, 6, 7, 8, 9),      # index
+        (10, 11, 12, 13, 14), # middle
+        (20, 21, 22, 23, 24), # little
+    )
+    _HEAD_IN_WAIST = np.array([0.15, 0.0, 0.45], dtype=float)
 
     def __init__(
         self,
-        hold_s: float = 0.20,
-        sequence_timeout_s: float = 4.00,
-        cooldown_s: float = 1.00,
+        hold_s: float = 3.0,
+        ring_pinch_ratio: float = 0.38,
+        straightness_ratio: float = 0.88,
+        facing_cosine: float = 0.60,
     ):
-        if min(hold_s, sequence_timeout_s, cooldown_s) <= 0.0:
-            raise ValueError("gesture timing values must be positive")
+        if hold_s <= 0.0:
+            raise ValueError("hold_s must be positive")
+        if not 0.0 < ring_pinch_ratio < 1.0:
+            raise ValueError("ring_pinch_ratio must be between zero and one")
+        if not 0.0 < straightness_ratio <= 1.0:
+            raise ValueError("straightness_ratio must be between zero and one")
+        if not -1.0 <= facing_cosine <= 1.0:
+            raise ValueError("facing_cosine must be between minus one and one")
         self.hold_s = hold_s
-        self.sequence_timeout_s = sequence_timeout_s
-        self.cooldown_s = cooldown_s
+        self.ring_pinch_ratio = ring_pinch_ratio
+        self.straightness_ratio = straightness_ratio
+        self.facing_cosine = facing_cosine
         self.reset()
 
     def reset(self) -> None:
-        self._step = 0
-        self._candidate = None
-        self._candidate_since = None
-        self._sequence_deadline = None
-        self._cooldown_until = 0.0
-        # Require both hands open after startup/tracking recovery and between steps.
-        self._awaiting_release = True
+        self._pose_started_at = None
+        self._latched = False
 
     @staticmethod
-    def _pose(left_fist: bool, right_fist: bool) -> str:
-        if left_fist and right_fist:
-            return "both"
-        if left_fist:
-            return "left"
-        if right_fist:
-            return "right"
-        return "open"
+    def _valid_hand_array(hand_positions) -> bool:
+        return (
+            isinstance(hand_positions, np.ndarray)
+            and hand_positions.shape == (25, 3)
+            and np.all(np.isfinite(hand_positions))
+        )
 
-    def _reset_sequence(self) -> None:
-        self._step = 0
-        self._candidate = None
-        self._candidate_since = None
-        self._sequence_deadline = None
+    def _fingers_are_straight(self, hand_positions: np.ndarray) -> bool:
+        for indices in self._STRAIGHT_FINGERS:
+            joints = hand_positions[list(indices)]
+            path_length = np.linalg.norm(np.diff(joints, axis=0), axis=1).sum()
+            if path_length <= 1e-6:
+                return False
+            chord_length = np.linalg.norm(joints[-1] - joints[0])
+            if chord_length / path_length < self.straightness_ratio:
+                return False
+        return True
 
-    def update(self, left_fist: bool, right_fist: bool, now: float | None = None) -> bool:
-        """Consume one sample and return ``True`` once per completed fist code."""
+    def _ring_is_pinched(self, hand_positions: np.ndarray) -> bool:
+        palm_length = np.linalg.norm(
+            hand_positions[self._MIDDLE_METACARPAL] - hand_positions[self._WRIST]
+        )
+        if palm_length <= 0.03:
+            return False
+        pinch_distance = np.linalg.norm(
+            hand_positions[self._THUMB_TIP] - hand_positions[self._RING_TIP]
+        )
+        return pinch_distance <= self.ring_pinch_ratio * palm_length
+
+    def _palm_faces_headset(self, wrist_pose, side: str) -> bool:
+        wrist_pose = np.asarray(wrist_pose)
+        if wrist_pose.shape != (4, 4) or not np.all(np.isfinite(wrist_pose)):
+            return False
+        wrist_to_head = self._HEAD_IN_WAIST - wrist_pose[:3, 3]
+        distance = np.linalg.norm(wrist_to_head)
+        if distance <= 1e-6:
+            return False
+        wrist_to_head /= distance
+
+        # Unitree wrist convention: left +Y points palm->back, while right +Y
+        # points back->palm.  Therefore the outward palm normals have opposite signs.
+        palm_normal = wrist_pose[:3, 1] * (-1.0 if side == "left" else 1.0)
+        normal_length = np.linalg.norm(palm_normal)
+        if normal_length <= 1e-6:
+            return False
+        palm_normal /= normal_length
+        return float(np.dot(palm_normal, wrist_to_head)) >= self.facing_cosine
+
+    def hand_matches(self, hand_positions, wrist_pose, side: str) -> bool:
+        if side not in ("left", "right"):
+            raise ValueError(f"Unknown hand side: {side}")
+        if not self._valid_hand_array(hand_positions):
+            return False
+        return (
+            self._ring_is_pinched(hand_positions)
+            and self._fingers_are_straight(hand_positions)
+            and self._palm_faces_headset(wrist_pose, side)
+        )
+
+    def update(
+        self,
+        left_hand_positions,
+        right_hand_positions,
+        left_wrist_pose,
+        right_wrist_pose,
+        now: float | None = None,
+    ) -> bool:
+        """Consume one sample and return ``True`` after a continuous valid hold."""
         now = time.monotonic() if now is None else float(now)
-        pose = self._pose(bool(left_fist), bool(right_fist))
+        pose_matches = self.hand_matches(
+            left_hand_positions, left_wrist_pose, "left"
+        ) and self.hand_matches(right_hand_positions, right_wrist_pose, "right")
 
-        if self._sequence_deadline is not None and now > self._sequence_deadline:
-            self._reset_sequence()
-            self._awaiting_release = pose != "open"
-
-        if self._awaiting_release:
-            if pose == "open":
-                self._awaiting_release = False
+        if not pose_matches:
+            self._pose_started_at = None
+            self._latched = False
+            return False
+        if self._latched:
+            return False
+        if self._pose_started_at is None:
+            self._pose_started_at = now
+            return False
+        if now - self._pose_started_at < self.hold_s:
             return False
 
-        if now < self._cooldown_until:
-            if pose != "open":
-                self._awaiting_release = True
-            return False
-
-        expected = self._PATTERN[self._step]
-        if pose == "open":
-            self._candidate = None
-            self._candidate_since = None
-            return False
-
-        if pose != expected:
-            self._reset_sequence()
-            self._awaiting_release = True
-            return False
-
-        if self._candidate != pose:
-            self._candidate = pose
-            self._candidate_since = now
-            return False
-        if now - self._candidate_since < self.hold_s:
-            return False
-
-        if self._step == 0:
-            self._sequence_deadline = now + self.sequence_timeout_s
-        self._step += 1
-        self._candidate = None
-        self._candidate_since = None
-        self._awaiting_release = True
-
-        if self._step < len(self._PATTERN):
-            return False
-
-        self._reset_sequence()
-        self._cooldown_until = now + self.cooldown_s
+        self._latched = True
         return True
 
 
