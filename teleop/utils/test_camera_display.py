@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from teleop.utils.camera_display import (
+    AlternatingFistGesture,
     CameraDisplay,
-    TripleDoublePinchGesture,
     camera_configs,
     resolve_camera_names,
 )
@@ -93,60 +93,66 @@ def test_binocular_reference_duplicates_multi_camera_dashboard_for_both_eyes():
     np.testing.assert_array_equal(canvas[:, :80], canvas[:, 80:])
 
 
-def _double_pinch_cycle(gesture, start):
-    assert not gesture.update(True, False, start)
-    triggered = gesture.update(True, True, start + 0.05)
-    assert not gesture.update(False, False, start + 0.15)
+def _fist_step(gesture, hand, start):
+    pose = (True, False) if hand == "left" else (False, True)
+    assert not gesture.update(*pose, start)
+    triggered = gesture.update(*pose, start + 0.21)
+    assert not gesture.update(False, False, start + 0.25)
     return triggered
 
 
-def test_triple_double_pinch_triggers_once_after_three_released_cycles():
-    gesture = TripleDoublePinchGesture()
-    assert not gesture.update(False, False, -0.1)
-    assert not _double_pinch_cycle(gesture, 0.0)
-    assert not _double_pinch_cycle(gesture, 0.6)
-    assert _double_pinch_cycle(gesture, 1.2)
+def _complete_fist_code(gesture, start=0.0):
+    assert not _fist_step(gesture, "left", start)
+    assert not _fist_step(gesture, "right", start + 0.6)
+    assert not _fist_step(gesture, "left", start + 1.2)
+    return _fist_step(gesture, "right", start + 1.8)
 
 
-def test_held_double_pinch_counts_only_once():
-    gesture = TripleDoublePinchGesture()
+def test_alternating_fist_code_triggers_once_in_the_correct_order():
+    gesture = AlternatingFistGesture()
     assert not gesture.update(False, False, -0.1)
-    assert not gesture.update(True, True, 0.0)
-    for now in (0.1, 0.5, 1.0, 2.0):
-        assert not gesture.update(True, True, now)
+    assert _complete_fist_code(gesture)
+
+
+def test_held_fist_counts_only_once_and_release_is_required():
+    gesture = AlternatingFistGesture()
+    assert not gesture.update(False, False, -0.1)
+    assert not gesture.update(True, False, 0.0)
+    assert not gesture.update(True, False, 0.21)
+    for now in (0.5, 1.0, 2.0):
+        assert not gesture.update(True, False, now)
 
 
 def test_gesture_requires_an_initial_fully_released_sample():
-    gesture = TripleDoublePinchGesture(required_cycles=1)
-    assert not gesture.update(True, True, 0.0)
-    assert not gesture.update(False, False, 0.1)
-    assert gesture.update(True, True, 0.2)
-
-
-def test_pinch_held_through_cooldown_does_not_start_a_new_cycle():
-    gesture = TripleDoublePinchGesture(required_cycles=1, cooldown_s=1.0)
-    assert not gesture.update(False, False, -0.1)
-    assert gesture.update(True, True, 0.0)
-    assert not gesture.update(False, False, 0.1)
-    assert not gesture.update(True, True, 0.2)
-    assert not gesture.update(True, True, 1.2)
-
-
-def test_unsynchronized_pinches_do_not_count():
-    gesture = TripleDoublePinchGesture(sync_window_s=0.2)
-    assert not gesture.update(False, False, -0.1)
+    gesture = AlternatingFistGesture()
     assert not gesture.update(True, False, 0.0)
-    assert not gesture.update(True, True, 0.3)
+    assert not gesture.update(True, False, 0.3)
     assert not gesture.update(False, False, 0.4)
-    assert not _double_pinch_cycle(gesture, 0.8)
-    assert not _double_pinch_cycle(gesture, 1.4)
+    assert not _fist_step(gesture, "left", 0.5)
 
 
-def test_triple_double_pinch_sequence_expires_and_requires_three_new_cycles():
-    gesture = TripleDoublePinchGesture(sequence_timeout_s=1.0)
+def test_both_fists_or_wrong_order_resets_the_sequence():
+    gesture = AlternatingFistGesture()
     assert not gesture.update(False, False, -0.1)
-    assert not _double_pinch_cycle(gesture, 0.0)
-    assert not _double_pinch_cycle(gesture, 0.4)
-    assert not _double_pinch_cycle(gesture, 1.6)
-    assert not _double_pinch_cycle(gesture, 2.0)
-    assert _double_pinch_cycle(gesture, 2.4)
+    assert not _fist_step(gesture, "left", 0.0)
+    assert not gesture.update(True, True, 0.6)
+    assert not gesture.update(True, True, 0.9)
+    assert not gesture.update(False, False, 1.0)
+    assert _complete_fist_code(gesture, 1.1)
+
+
+def test_alternating_fist_sequence_expires_and_restarts_from_left():
+    gesture = AlternatingFistGesture(sequence_timeout_s=3.0)
+    assert not gesture.update(False, False, -0.1)
+    assert not _fist_step(gesture, "left", 0.0)
+    assert not _fist_step(gesture, "right", 3.5)
+    assert _complete_fist_code(gesture, 4.0)
+
+
+def test_gesture_does_not_restart_while_cooling_down():
+    gesture = AlternatingFistGesture(cooldown_s=1.0)
+    assert not gesture.update(False, False, -0.1)
+    assert _complete_fist_code(gesture)
+    assert not gesture.update(True, False, 2.2)
+    assert not gesture.update(True, False, 3.3)
+    assert not gesture.update(False, False, 3.4)

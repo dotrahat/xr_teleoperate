@@ -10,94 +10,105 @@ import cv2
 import numpy as np
 
 
-class TripleDoublePinchGesture:
-    """Detect three synchronized two-hand pinch/release cycles.
+class AlternatingFistGesture:
+    """Detect the deliberate left-right-left-right fist sequence.
 
-    A cycle counts only when the left and right pinch rising edges occur within
-    ``sync_window_s`` and both hands have fully released since the previous
-    cycle.  Holding a pinch cannot generate repeats.  This makes the gesture
-    substantially less likely during normal one-handed or bimanual grasping.
+    Every fist must be held for ``hold_s`` and followed by a fully open sample.
+    Both fists, the wrong hand, a held pose, or an expired sequence reset the
+    detector.  The asymmetric four-step code avoids Meta's pinch interaction
+    and is very unlikely to occur during ordinary manipulation.
     """
+
+    _PATTERN = ("left", "right", "left", "right")
 
     def __init__(
         self,
-        required_cycles: int = 3,
-        sync_window_s: float = 0.20,
-        sequence_timeout_s: float = 2.50,
+        hold_s: float = 0.20,
+        sequence_timeout_s: float = 4.00,
         cooldown_s: float = 1.00,
     ):
-        if required_cycles < 1:
-            raise ValueError("required_cycles must be positive")
-        if min(sync_window_s, sequence_timeout_s, cooldown_s) <= 0.0:
+        if min(hold_s, sequence_timeout_s, cooldown_s) <= 0.0:
             raise ValueError("gesture timing values must be positive")
-        self.required_cycles = required_cycles
-        self.sync_window_s = sync_window_s
+        self.hold_s = hold_s
         self.sequence_timeout_s = sequence_timeout_s
         self.cooldown_s = cooldown_s
         self.reset()
 
     def reset(self) -> None:
-        self._previous_left = False
-        self._previous_right = False
-        self._left_rise_time = None
-        self._right_rise_time = None
-        # Require one observed fully-open sample before accepting the first cycle.
-        # This prevents a gesture from starting halfway through tracking recovery.
-        self._cycle_armed = False
-        self._cycle_count = 0
+        self._step = 0
+        self._candidate = None
+        self._candidate_since = None
         self._sequence_deadline = None
         self._cooldown_until = 0.0
+        # Require both hands open after startup/tracking recovery and between steps.
+        self._awaiting_release = True
 
-    def update(self, left_pinching: bool, right_pinching: bool, now: float | None = None) -> bool:
-        """Consume one sample and return ``True`` once per completed gesture."""
+    @staticmethod
+    def _pose(left_fist: bool, right_fist: bool) -> str:
+        if left_fist and right_fist:
+            return "both"
+        if left_fist:
+            return "left"
+        if right_fist:
+            return "right"
+        return "open"
+
+    def _reset_sequence(self) -> None:
+        self._step = 0
+        self._candidate = None
+        self._candidate_since = None
+        self._sequence_deadline = None
+
+    def update(self, left_fist: bool, right_fist: bool, now: float | None = None) -> bool:
+        """Consume one sample and return ``True`` once per completed fist code."""
         now = time.monotonic() if now is None else float(now)
-        left_pinching = bool(left_pinching)
-        right_pinching = bool(right_pinching)
-
-        left_rose = left_pinching and not self._previous_left
-        right_rose = right_pinching and not self._previous_right
-        if left_rose:
-            self._left_rise_time = now
-        if right_rose:
-            self._right_rise_time = now
-
-        both_released = not left_pinching and not right_pinching
-        if both_released:
-            self._cycle_armed = True
-            self._left_rise_time = None
-            self._right_rise_time = None
+        pose = self._pose(bool(left_fist), bool(right_fist))
 
         if self._sequence_deadline is not None and now > self._sequence_deadline:
-            self._cycle_count = 0
-            self._sequence_deadline = None
+            self._reset_sequence()
+            self._awaiting_release = pose != "open"
 
-        triggered = False
-        synchronized = (
-            self._left_rise_time is not None
-            and self._right_rise_time is not None
-            and abs(self._left_rise_time - self._right_rise_time) <= self.sync_window_s
-        )
-        if (
-            now >= self._cooldown_until
-            and self._cycle_armed
-            and left_pinching
-            and right_pinching
-            and synchronized
-            and (left_rose or right_rose)
-        ):
-            self._cycle_armed = False
-            if self._cycle_count == 0:
-                self._sequence_deadline = now + self.sequence_timeout_s
-            self._cycle_count += 1
-            if self._cycle_count >= self.required_cycles:
-                triggered = True
-                self._cycle_count = 0
-                self._sequence_deadline = None
-                self._cooldown_until = now + self.cooldown_s
+        if self._awaiting_release:
+            if pose == "open":
+                self._awaiting_release = False
+            return False
 
-        self._previous_left = left_pinching
-        self._previous_right = right_pinching
-        return triggered
+        if now < self._cooldown_until:
+            if pose != "open":
+                self._awaiting_release = True
+            return False
+
+        expected = self._PATTERN[self._step]
+        if pose == "open":
+            self._candidate = None
+            self._candidate_since = None
+            return False
+
+        if pose != expected:
+            self._reset_sequence()
+            self._awaiting_release = True
+            return False
+
+        if self._candidate != pose:
+            self._candidate = pose
+            self._candidate_since = now
+            return False
+        if now - self._candidate_since < self.hold_s:
+            return False
+
+        if self._step == 0:
+            self._sequence_deadline = now + self.sequence_timeout_s
+        self._step += 1
+        self._candidate = None
+        self._candidate_since = None
+        self._awaiting_release = True
+
+        if self._step < len(self._PATTERN):
+            return False
+
+        self._reset_sequence()
+        self._cooldown_until = now + self.cooldown_s
+        return True
 
 
 def camera_configs(config: Mapping) -> dict[str, Mapping]:
