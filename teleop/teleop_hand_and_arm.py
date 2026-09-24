@@ -31,6 +31,13 @@ from teleop.utils.head_relative_monitor import (
     validate_head_relative_monitor_config,
 )
 from teleop.utils.ipc import IPC_Server
+from teleop.utils.camera_display import (
+    AlternatingFistGesture,
+    CameraDisplay,
+    DualRingPinchGesture,
+    TripleDoublePinchGesture,
+    resolve_camera_names,
+)
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.locomotion_retarget import (HeadLocomotionRetargeter, LocoTuning, eval_deadman,
                                               deadman_is_available, joystick_twist, LatchingToggle)
@@ -52,6 +59,7 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+CAMERA_DISPLAY = None   # Set after TeleImage configuration is received.
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -65,7 +73,7 @@ RECORD_TOGGLE  = False  # Toggle recording state
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE
+    global STOP, START, RECORD_TOGGLE, CAMERA_DISPLAY
     if key == 'r':
         START = True
     elif key == 'q':
@@ -73,6 +81,9 @@ def on_press(key):
         STOP = True
     elif key == 's' and START == True:
         RECORD_TOGGLE = True
+    elif key == 'c' and CAMERA_DISPLAY is not None:
+        camera_name = CAMERA_DISPLAY.cycle()
+        logger_mp.info(f"📷 XR camera: {camera_name}")
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
@@ -86,12 +97,37 @@ def get_state() -> dict:
         "RECORD_RUNNING": RECORD_RUNNING,
     }
 
+
+def update_camera_switch_gesture(gesture, camera_display, tele_data):
+    """Cycle the XR camera when the deliberate hand gesture completes."""
+    if gesture is None:
+        return False
+    if not tele_data.motion_data_ready:
+        gesture.reset()
+        return False
+    if gesture.update_tele_data(tele_data):
+        camera_name = camera_display.cycle()
+        logger_mp.info(f"📷 XR camera gesture accepted: {camera_name}")
+        return True
+    return False
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # basic control parameters
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
     parser.add_argument('--display-mode', type=str, choices=['immersive', 'ego', 'pass-through'], default='immersive', help='Select XR device display mode')
+    parser.add_argument('--xr-camera-layout', type=str, choices=['single', 'side-by-side'], default='single',
+                        help='Headset camera layout. "single" shows one selected camera and [c] cycles; '
+                             '"side-by-side" shows every selected camera simultaneously.')
+    parser.add_argument('--xr-cameras', type=str, default='auto',
+                        help='Camera topics shown in XR: "auto" (head camera, or first enabled), "all", '
+                             'or a comma-separated list such as head_camera,left_wrist_camera.')
+    parser.add_argument('--xr-camera-gesture', type=str,
+                        choices=['dual-ring-pinch', 'alternating-fists', 'triple-double-pinch', 'off'],
+                        default='dual-ring-pinch',
+                        help='Meta Quest hand gesture for cycling cameras in single layout. '
+                             'Choose dual-ring-pinch, alternating-fists, triple-double-pinch, or off.')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2', 'R1_A5', 'R1_A7'], default='G1_29', help='Select arm controller')
     parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
     parser.add_argument('--arm-reference-mode', type=str, choices=['head_yaw', 'head_position'], default='head_yaw',
@@ -306,19 +342,98 @@ if __name__ == '__main__':
         img_client = ImageClient(host=args.img_server_ip, request_bgr=True)
         camera_config = img_client.get_cam_config()
         logger_mp.debug(f"Camera config: {camera_config}")
-        xr_need_local_img = not (args.display_mode == 'pass-through' or camera_config['head_camera']['enable_webrtc'])
+        selected_camera_names = resolve_camera_names(camera_config, args.xr_cameras)
+        camera_display = CameraDisplay(
+            camera_config,
+            camera_names=selected_camera_names,
+            layout=args.xr_camera_layout,
+        )
+        CAMERA_DISPLAY = camera_display
+        reference_camera = camera_config[selected_camera_names[0]]
+        xr_need_local_img = (
+            args.display_mode != 'pass-through'
+            and (
+                camera_display.requires_local_zmq()
+                or not reference_camera.get('enable_webrtc', False)
+            )
+        )
+        if xr_need_local_img:
+            camera_display.validate_local_zmq()
+        use_direct_webrtc = (
+            args.display_mode != 'pass-through'
+            and not xr_need_local_img
+            and reference_camera.get('enable_webrtc', False)
+        )
+        logger_mp.info(
+            f"📷 XR cameras: {', '.join(selected_camera_names)}; "
+            f"layout={args.xr_camera_layout}; "
+            f"transport={'ZMQ composite' if xr_need_local_img else ('WebRTC' if use_direct_webrtc else 'off')}"
+        )
+        if args.xr_camera_layout == 'single' and len(selected_camera_names) > 1:
+            logger_mp.info("📷 Press [c] (or send IPC command 'c') to cycle XR cameras.")
 
-        # televuer_wrapper: obtain hand pose data from the XR device and transmit the robot's head camera image to the XR device.
+        camera_switch_gesture = None
+        gesture_requested = args.xr_camera_gesture != 'off'
+        gesture_factories = {
+            'dual-ring-pinch': DualRingPinchGesture,
+            'alternating-fists': AlternatingFistGesture,
+            'triple-double-pinch': TripleDoublePinchGesture,
+        }
+        gesture_descriptions = {
+            'dual-ring-pinch': (
+                "touch thumb to ring fingertip on both hands, keep the other fingers "
+                "straight, face both palms toward the headset, and hold for three seconds"
+            ),
+            'alternating-fists': (
+                "make left-right-left-right fists, fully opening both hands between steps"
+            ),
+            'triple-double-pinch': (
+                "pinch both hands together three times, fully releasing between pinches"
+            ),
+        }
+        gesture_conflicts_with_locomotion = (
+            args.head_loco
+            and args.loco_gate == 'hold'
+            and (
+                (args.xr_camera_gesture == 'alternating-fists'
+                 and args.loco_deadman in ('left_fist', 'right_fist', 'both_fist'))
+                or (args.xr_camera_gesture == 'triple-double-pinch'
+                    and args.loco_deadman in ('left_pinch', 'right_pinch'))
+            )
+        )
+        if (
+            gesture_requested
+            and args.input_mode == 'hand'
+            and args.display_mode != 'pass-through'
+            and args.xr_camera_layout == 'single'
+            and len(selected_camera_names) > 1
+            and not gesture_conflicts_with_locomotion
+        ):
+            camera_switch_gesture = gesture_factories[args.xr_camera_gesture]()
+            logger_mp.info(
+                f"📷 Quest camera gesture enabled ({args.xr_camera_gesture}): "
+                f"{gesture_descriptions[args.xr_camera_gesture]}."
+            )
+        elif gesture_requested and gesture_conflicts_with_locomotion:
+            logger_mp.warning(
+                f"📷 Quest camera gesture {args.xr_camera_gesture!r} disabled because it "
+                "uses the selected head-locomotion deadman input. Choose a different "
+                "camera gesture or pass --xr-camera-gesture=off."
+            )
+
+        # televuer_wrapper: obtain XR poses and display either one direct stream or a
+        # locally composed canvas containing the selected camera streams.
         tv_wrapper = TeleVuerWrapper(use_hand_tracking=args.input_mode == "hand", 
-                                     binocular=camera_config['head_camera']['binocular'],
-                                     img_shape=camera_config['head_camera']['image_shape'],
+                                     binocular=camera_display.binocular,
+                                     img_shape=(camera_display.height, camera_display.width),
                                      # maybe should decrease fps for better performance?
                                      # https://github.com/unitreerobotics/xr_teleoperate/issues/172
                                      # display_fps=camera_config['head_camera']['fps'] ? args.frequency? 30.0?
                                      display_mode=args.display_mode,
-                                     zmq=camera_config['head_camera']['enable_zmq'],
-                                     webrtc=camera_config['head_camera']['enable_webrtc'],
-                                     webrtc_url=f"https://{args.img_server_ip}:{camera_config['head_camera']['webrtc_port']}/offer",
+                                     zmq=xr_need_local_img,
+                                     webrtc=use_direct_webrtc,
+                                     webrtc_url=(f"https://{args.img_server_ip}:{reference_camera['webrtc_port']}/offer"
+                                                 if use_direct_webrtc else None),
                                      arm_reference_mode=args.arm_reference_mode
                                      )
         logger_mp.info(f"🖐️  arm reference mode: {args.arm_reference_mode}")
@@ -622,10 +737,17 @@ if __name__ == '__main__':
         READY = True                  # now ready to (1) enter START state
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
-            if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
-                head_img = img_client.get_head_frame()
-                if head_img.bgr is not None:
-                    tv_wrapper.render_to_xr(head_img.bgr)
+            if xr_need_local_img:
+                display_frames = {
+                    name: img_client.get_frame(name)
+                    for name in camera_display.displayed_camera_names
+                }
+                tv_wrapper.render_to_xr(camera_display.compose(display_frames))
+            if camera_switch_gesture is not None:
+                preview_tele_data = tv_wrapper.get_tele_data()
+                update_camera_switch_gesture(
+                    camera_switch_gesture, camera_display, preview_tele_data
+                )
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
         arm_ctrl.speed_gradual_max()
@@ -647,18 +769,19 @@ if __name__ == '__main__':
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
-            # get image
-            if camera_config['head_camera']['enable_zmq']:
-                if args.record or xr_need_local_img:
-                    head_img = img_client.get_head_frame()
-                if xr_need_local_img and head_img.bgr is not None:
-                    tv_wrapper.render_to_xr(head_img.bgr)
-            if camera_config['left_wrist_camera']['enable_zmq']:
-                if args.record:
-                    left_wrist_img = img_client.get_left_wrist_frame()
-            if camera_config['right_wrist_camera']['enable_zmq']:
-                if args.record:
-                    right_wrist_img = img_client.get_right_wrist_frame()
+            # Fetch each needed stream once. Display selection is generic; the three legacy
+            # assignments below remain for the existing episode-recording schema.
+            frame_names = list(camera_display.displayed_camera_names) if xr_need_local_img else []
+            if args.record:
+                for name in ('head_camera', 'left_wrist_camera', 'right_wrist_camera'):
+                    if camera_config.get(name, {}).get('enable_zmq', False) and name not in frame_names:
+                        frame_names.append(name)
+            camera_frames = {name: img_client.get_frame(name) for name in frame_names}
+            if xr_need_local_img:
+                tv_wrapper.render_to_xr(camera_display.compose(camera_frames))
+            head_img = camera_frames.get('head_camera')
+            left_wrist_img = camera_frames.get('left_wrist_camera')
+            right_wrist_img = camera_frames.get('right_wrist_camera')
 
             # record mode
             if args.record and RECORD_TOGGLE:
@@ -676,6 +799,7 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_data = tv_wrapper.get_tele_data()
+            update_camera_switch_gesture(camera_switch_gesture, camera_display, tele_data)
             if args.g1_head_origin_calibration:
                 tele_data.left_wrist_pose = retarget_wrist_pose_head_origin(
                     tele_data.left_wrist_pose, active_robot_head_in_waist
