@@ -234,7 +234,7 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 |    `--input-mode`     |         XR 入力モードを選択（ロボットの制御方法）          | `hand`（ハンドトラッキング）<br />`controller`（コントローラートラッキング） |      `hand`       |
 |   `--display-mode`    |        XR 表示モードを選択（ロボット視点の見方）          | `immersive`（没入型）<br />`ego`（パススルー + 一人称小窓）<br />`pass-through`（パススルーのみ） |    `immersive`    |
 |        `--arm`        |         ロボットアームタイプを選択（0. 📖 参照）          | `G1_29`<br />`G1_23`<br />`H1_2`<br />`H1`<br />`H2`<br />`R1_A5`<br />`R1_A7` |      `G1_29`      |
-|        `--ee`         |       エンドエフェクタタイプを選択（0. 📖 参照）          | `dex1`<br />`dex3`<br />`inspire_ftp`<br />`inspire_dfx`<br />`brainco` |     デフォルト無  |
+|        `--ee`         |       エンドエフェクタタイプを選択（0. 📖 参照）          | `dex1`<br />`dex1_internal`<br />`dex3`<br />`inspire_ftp`<br />`inspire_dfx`<br />`brainco` |     デフォルト無  |
 |   `--img-server-ip`   | 画像サーバーの IP アドレスを設定（画像ストリーム受信・WebRTC シグナリング設定用） |                       `IPv4` アドレス                      | `192.168.123.164` |
 | `--network-interface` |            CycloneDDS 通信のネットワークインターフェースを設定            |                    ネットワークIF名                       |      `None`       |
 
@@ -246,7 +246,6 @@ build  cert.pem  key.pem  LICENSE  pyproject.toml  README.md  rootCA.key  rootCA
 | `--headless` | 【**ヘッドレスモード**を有効化】<br />ディスプレイのない開発用計算ユニット（PC2）などでの実行に適しています。 |
 |   `--sim`    | 【[**シミュレーションモード**](https://github.com/unitreerobotics/unitree_sim_isaaclab)を有効化】 |
 |   `--ipc`    | 【プロセス間通信モード】<br />IPC を通じて xr_teleoperate プログラムの状態遷移を制御できます。エージェントプログラムとの連携に適しています。 |
-| `--affinity` | 【CPU アフィニティモード】<br />CPU コアのアフィニティを設定します。分からない場合は設定しないでください。 |
 |  `--record`  | 【**データ記録モード**を有効化】<br />**r** で遠隔操作を開始した後、**s** で記録開始、再度 **s** でエピソードの記録を停止・保存します。**s** を繰り返し押すことでこの操作を繰り返せます。 |
 | `--task-dir` | 記録データの保存パス。デフォルト：`./utils/data/` |
 | `--task-name` | 記録するタスクのファイル名。デフォルト：`pick cube` |
@@ -485,6 +484,8 @@ unitree@PC2:~/DFX_inspire_service/build$ ./hand_example
 ## 3.4 ✋ Unitree Dex1_1 サービス（オプション）
 
 [リポジトリのドキュメント](https://github.com/unitreerobotics/dex1_1_service) を参照してください。
+
+内部配線の Dex1 グリッパーを搭載した G1-29 では、`--arm G1_29 --ee dex1_internal` を使用してください。このモードでは、G1 の低レベルコマンドにあるモーター番号 31 と 33 を使用して左右のグリッパーをそれぞれ制御するため、外部 Dex1 サービスを起動する必要はありません。`rt/arm_sdk` 経由で内部配線のグリッパーを制御できるかどうかはまだ検証されていないため、現在は `--motion` と同時に使用できません。
 
 ## 3.5 🚀 遠隔操作の起動
 
